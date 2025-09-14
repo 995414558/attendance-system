@@ -1412,17 +1412,32 @@ function updateCameraStatus(status) {
 
 // Initialize when page loads
 document.addEventListener('DOMContentLoaded', async function() {
-    // Check camera permission first
-    await checkCameraPermission();
+    const hasData = document.getElementById('data-page');
+    const hasAttendance = document.getElementById('attendance-page');
+    const hasReports = document.getElementById('reports-page');
+    const hasStats = document.getElementById('statistics-page');
+    const hasBatch = document.getElementById('batch-page');
 
-    // Show Data & Register page by default
-    showPage('data');
+    if (hasAttendance || hasData) {
+        await checkCameraPermission();
+    }
 
-    // Load overall statistics
-    loadOverallStats();
-
-    // Then initialize the app
-    init();
+    if (hasData) {
+        // Data & Register needs models for face registration
+        init();
+    } else if (hasAttendance) {
+        // Attendance requires models + known faces
+        init();
+    } else if (hasReports) {
+        loadSessionsForReport();
+    } else if (hasStats) {
+        loadOverallStats();
+        loadCourseStats();
+        loadClassStats();
+        loadStudentStats();
+    } else if (hasBatch) {
+        // Batch page: no special init required
+    }
 });
 
 // Cleanup on page unload

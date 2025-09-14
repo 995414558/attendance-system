@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Take Attendance</title>
+  <script src="https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js"></script>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <nav>
+    <div class="nav-container">
+      <h1 data-i18n="nav_title">Face Attendance System</h1>
+      <ul>
+        <li><a href="data.html" data-i18n="nav_data_register">Data & Register</a></li>
+        <li><a href="attendance.html" data-i18n="nav_attendance">Take Attendance</a></li>
+        <li><a href="batch.html" data-i18n="nav_batch">Batch Processing</a></li>
+        <li><a href="reports.html" data-i18n="nav_reports">Reports</a></li>
+        <li><a href="statistics.html" data-i18n="nav_statistics">Statistics</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <main>
+    <div id="attendance-page" class="page">
+      <h2 data-i18n="attendance_title">Take Attendance</h2>
+
+      <div id="camera-status" class="status-indicator" style="margin: 10px 0; padding: 10px; background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 4px;">
+        <span id="camera-icon">📷</span>
+        <span id="camera-text">摄像头状态 检查中...</span>
+      </div>
+
+      <div class="form-group">
+        <label for="class-select">Class:</label>
+        <select id="class-select" onchange="updateCourseOptions()">
+          <option value="">Select Class</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="course-select">Course:</label>
+        <select id="course-select">
+          <option value="">Select Course</option>
+        </select>
+      </div>
+
+      <div id="current-session-info" style="display: none; margin: 10px 0; padding: 10px; background-color: #e8f5e8; border-radius: 4px;">
+        <strong>Current Session:</strong> <span id="current-session-display"></span>
+      </div>
+
+      <button onclick="startAttendance()" data-i18n="attendance_start_btn">Start Attendance Session</button>
+      <button onclick="stopAttendance()" style="background-color: #e74c3c; margin-left: 10px;" data-i18n="attendance_stop_btn">Stop Attendance</button>
+
+      <div id="attendance-status" style="margin: 10px 0; padding: 10px; background-color: #f8f9fa; border-radius: 4px; display: none;">
+        <div style="display: flex; align-items: center;">
+          <div id="status-indicator" style="width: 12px; height: 12px; border-radius: 50%; background-color: #28a745; margin-right: 10px; animation: pulse 2s infinite;"></div>
+          <span id="status-text">考勤系统运行中...</span>
+        </div>
+      </div>
+
+      <video id="attendance-video" autoplay muted></video>
+      <canvas id="attendance-canvas"></canvas>
+      <div id="attendance-log"></div>
+    </div>
+  </main>
+
+  <script src="js/i18n.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

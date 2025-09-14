@@ -32,7 +32,8 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use('/weights', express.static('../../weights'));
 
 app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/../frontend/index.html');
+  // Serve the Data & Register page as the default landing page
+  res.sendFile(path.join(__dirname, '..', 'frontend', 'data.html'));
 });
 
 app.listen(PORT, () => {
