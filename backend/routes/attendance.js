@@ -71,16 +71,15 @@ router.get('/summary/:session_id', (req, res) => {
 router.get('/session/:session_id', (req, res) => {
   const { session_id } = req.params;
   const sql = `
-    SELECT 
+    SELECT
       sa.session_id,
       sa.student_number,
       st.name,
       st.class_name,
-      ss.course_name,
+      sa.course_name,
       st.photo_path
     FROM session_attendees sa
     LEFT JOIN students st ON st.student_number = sa.student_number
-    LEFT JOIN sessions ss ON ss.id = sa.session_id
     WHERE sa.session_id = ?
     ORDER BY COALESCE(st.class_name, ''), COALESCE(st.name, ''), sa.student_number
   `;
@@ -104,49 +103,70 @@ router.get('/count/:face_id', (req, res) => {
 // Get statistics by course
 router.get('/stats/by-course', (req, res) => {
   const query = `
-    WITH course_sessions AS (
-      SELECT course_name AS course, COUNT(DISTINCT id) AS total_sessions
-      FROM sessions
-      GROUP BY course_name
+    WITH courses_all AS (
+      SELECT DISTINCT course_name AS course FROM course_students
+      UNION
+      SELECT DISTINCT course_name AS course FROM sessions
+    ),
+    course_sessions AS (
+      SELECT ca.course,
+             COALESCE((SELECT COUNT(DISTINCT s.id) FROM sessions s WHERE s.course_name = ca.course), 0) AS total_sessions
+      FROM courses_all ca
     ),
     students_in_course AS (
-      SELECT DISTINCT f.name, f.class, f.course
-      FROM faces f
-      WHERE f.course IS NOT NULL
+      SELECT DISTINCT cs.course_name AS course, cs.student_number, s.class_name
+      FROM course_students cs
+      JOIN students s ON s.student_number = cs.student_number
     ),
     per_student AS (
       SELECT sic.course,
-             sic.name,
-             sic.class,
-             COUNT(DISTINCT a.session_id) AS attended
+             sic.student_number,
+             COALESCE(COUNT(DISTINCT sess.id), 0) AS total_for_student,
+             COALESCE(COUNT(DISTINCT sa.session_id), 0) AS attended
       FROM students_in_course sic
-      LEFT JOIN faces f ON f.name = sic.name AND f.class = sic.class AND f.course = sic.course
-      LEFT JOIN attendance a ON a.face_id = f.id
-      LEFT JOIN sessions s ON s.id = a.session_id AND s.course_name = sic.course
-      GROUP BY sic.course, sic.name, sic.class
+      LEFT JOIN sessions sess
+        ON sess.course_name = sic.course
+       AND sess.class_name = sic.class_name
+      LEFT JOIN session_attendees sa
+        ON sa.session_id = sess.id
+       AND sa.student_number = sic.student_number
+       AND sa.course_name = sic.course
+      GROUP BY sic.course, sic.student_number
     )
     SELECT
       cs.course,
-      COUNT(DISTINCT ps.name || '|' || ps.class) AS total_students,
+      COUNT(DISTINCT ps.student_number) AS total_students,
       cs.total_sessions,
       COALESCE(SUM(ps.attended), 0) AS total_attendance,
-      ROUND(AVG(CASE WHEN cs.total_sessions = 0 THEN 0 ELSE CAST(ps.attended AS FLOAT) / cs.total_sessions END) * 100, 2) AS attendance_rate
+      ROUND(
+        AVG(
+          CASE WHEN COALESCE(ps.total_for_student, 0) = 0
+               THEN 0
+               ELSE CAST(ps.attended AS FLOAT) / ps.total_for_student
+          END
+        ) * 100, 2
+      ) AS attendance_rate
     FROM course_sessions cs
     LEFT JOIN per_student ps ON ps.course = cs.course
     GROUP BY cs.course
     ORDER BY attendance_rate DESC
   `;
 
+  console.log('[stats/by-course] executing SQL:\n' + query);
+  console.time('[stats/by-course]');
   db.all(query, [], (err, rows) => {
+    console.timeEnd('[stats/by-course]');
     if (err) {
+      console.error('[stats/by-course] error:', err.message);
       res.status(500).json({ error: err.message });
       return;
     }
+    console.log('[stats/by-course] rows:', rows ? rows.length : 0);
     res.json({ stats: rows });
   });
 });
 
-// Get statistics by class
+// Get statistics by class (students + session_attendees based)
 router.get('/stats/by-class', (req, res) => {
   const query = `
     WITH class_sessions AS (
@@ -155,71 +175,128 @@ router.get('/stats/by-class', (req, res) => {
       GROUP BY class_name
     ),
     students_in_class AS (
-      SELECT DISTINCT f.name, f.class
-      FROM faces f
-      WHERE f.class IS NOT NULL
+      SELECT class_name AS class, student_number
+      FROM students
+      WHERE class_name IS NOT NULL
     ),
     per_student AS (
       SELECT sic.class,
-             sic.name,
-             COUNT(DISTINCT a.session_id) AS attended
+             sic.student_number,
+             COUNT(DISTINCT sa.session_id) AS attended
       FROM students_in_class sic
-      LEFT JOIN faces f ON f.name = sic.name AND f.class = sic.class
-      LEFT JOIN attendance a ON a.face_id = f.id
-      LEFT JOIN sessions s ON s.id = a.session_id AND s.class_name = sic.class
-      GROUP BY sic.class, sic.name
+      LEFT JOIN sessions s ON s.class_name = sic.class
+      LEFT JOIN session_attendees sa
+        ON sa.session_id = s.id
+       AND sa.student_number = sic.student_number
+       AND sa.course_name = s.course_name
+      GROUP BY sic.class, sic.student_number
     )
     SELECT
       cs.class,
-      COUNT(DISTINCT ps.name) AS total_students,
+      COUNT(DISTINCT ps.student_number) AS total_students,
       cs.total_sessions,
       COALESCE(SUM(ps.attended), 0) AS total_attendance,
-      ROUND(AVG(CASE WHEN cs.total_sessions = 0 THEN 0 ELSE CAST(ps.attended AS FLOAT) / cs.total_sessions END) * 100, 2) AS attendance_rate
+      ROUND(
+        AVG(CASE WHEN cs.total_sessions = 0 THEN 0 ELSE CAST(ps.attended AS FLOAT) / cs.total_sessions END) * 100,
+        2
+      ) AS attendance_rate
     FROM class_sessions cs
     LEFT JOIN per_student ps ON ps.class = cs.class
     GROUP BY cs.class
     ORDER BY attendance_rate DESC
   `;
 
+  console.log('[stats/by-class] executing SQL:\n' + query);
+  console.time('[stats/by-class]');
   db.all(query, [], (err, rows) => {
+    console.timeEnd('[stats/by-class]');
     if (err) {
+      console.error('[stats/by-class] error:', err.message);
       res.status(500).json({ error: err.message });
       return;
     }
+    console.log('[stats/by-class] rows:', rows ? rows.length : 0);
     res.json({ stats: rows });
   });
 });
 
-// Get overall statistics
+// Get overall statistics (students + course_students + session_attendees)
 router.get('/stats/overall', (req, res) => {
   const queries = {
-    total_students: 'SELECT COUNT(*) as count FROM faces',
+    total_students: 'SELECT COUNT(*) as count FROM students',
     total_sessions: 'SELECT COUNT(DISTINCT id) as count FROM sessions',
-    total_attendance: 'SELECT COUNT(DISTINCT id) as count FROM attendance',
+    total_attendance: 'SELECT COUNT(*) as count FROM (SELECT DISTINCT session_id, student_number, course_name FROM session_attendees)',
     avg_attendance_rate: `
+      /* Attended-course denominator:
+         For each student, consider only the courses (sa.course_name)
+         where the student actually has attendance within their class.
+         Denominator = total sessions in their class for those courses. */
+      WITH student_overview AS (
+        SELECT student_number, class_name AS class
+        FROM students
+        WHERE class_name IS NOT NULL
+      ),
+      attended_courses AS (
+        SELECT so.student_number, sa.course_name
+        FROM student_overview so
+        JOIN session_attendees sa ON sa.student_number = so.student_number
+        JOIN sessions sess ON sess.id = sa.session_id
+        WHERE sess.class_name = so.class
+        GROUP BY so.student_number, sa.course_name
+      ),
+      total_sessions AS (
+        SELECT so.student_number, COUNT(DISTINCT sess.id) AS total_sessions
+        FROM student_overview so
+        LEFT JOIN attended_courses ac ON ac.student_number = so.student_number
+        LEFT JOIN sessions sess
+          ON sess.class_name = so.class
+         AND sess.course_name = ac.course_name
+        GROUP BY so.student_number
+      ),
+      attendance_count AS (
+        SELECT so.student_number, COUNT(DISTINCT sa.session_id) AS attendance_count
+        FROM student_overview so
+        JOIN session_attendees sa ON sa.student_number = so.student_number
+        JOIN sessions sess ON sess.id = sa.session_id
+        WHERE sess.class_name = so.class
+        GROUP BY so.student_number
+      )
       SELECT ROUND(
-        CAST((SELECT COUNT(DISTINCT id) FROM attendance) AS FLOAT) /
-        (SELECT COUNT(DISTINCT id) FROM sessions) * 100,
-        2
-      ) as rate
+        AVG(
+          CASE WHEN COALESCE(ts.total_sessions, 0) = 0
+               THEN 0
+               ELSE CAST(COALESCE(ac.attendance_count, 0) AS FLOAT) / ts.total_sessions
+          END
+        ) * 100, 2
+      ) AS rate
+      FROM student_overview so
+      LEFT JOIN total_sessions ts ON ts.student_number = so.student_number
+      LEFT JOIN attendance_count ac ON ac.student_number = so.student_number
     `
   };
 
   const results = {};
 
+  console.log('[stats/overall] executing keys:', Object.keys(queries));
   const executeQueries = (keys) => {
     if (keys.length === 0) {
+      console.log('[stats/overall] final results:', results);
       res.json({ stats: results });
       return;
     }
-
+  
     const key = keys[0];
-    db.get(queries[key], [], (err, row) => {
+    const sql = queries[key];
+    console.log(`[stats/overall] SQL for ${key}:\n${sql}`);
+    console.time(`[stats/overall] ${key}`);
+    db.get(sql, [], (err, row) => {
+      console.timeEnd(`[stats/overall] ${key}`);
       if (err) {
-        res.status(500).json({ error: err.message });
+        console.error('[stats/overall] error for', key, err.message);
+        res.status(500).json({ error: err.message, key });
         return;
       }
-      results[key] = row.count || row.rate;
+      results[key] = row ? (row.count ?? row.rate ?? 0) : 0;
       executeQueries(keys.slice(1));
     });
   };
@@ -240,10 +317,12 @@ router.post('/', (req, res) => {
     return res.status(400).json({ error: 'session_id and (student_number or face_id) are required' });
   }
 
-  // Verify session exists
-  db.get('SELECT id FROM sessions WHERE id = ?', [session_id], (errSession, sessionRow) => {
+  // Verify session exists and get course_name
+  db.get('SELECT id, course_name FROM sessions WHERE id = ?', [session_id], (errSession, sessionRow) => {
     if (errSession) return res.status(500).json({ error: errSession.message });
     if (!sessionRow) return res.status(404).json({ error: 'Session not found' });
+
+    const sessionCourse = sessionRow.course_name;
 
     const insertLegacyAttendance = (finalFaceId, sn) => {
       // If no face id, try to derive one from student for legacy summary
@@ -283,18 +362,18 @@ router.post('/', (req, res) => {
         if (errStu) return res.status(500).json({ error: errStu.message });
         if (!stuRow) return res.status(404).json({ error: 'Student not found' });
 
-        // Insert or ignore session attendee (de-dup per session_id + student_number)
+        // Insert or ignore session attendee (de-dup per session_id + student_number + course_name)
         db.run(
-          'INSERT OR IGNORE INTO session_attendees (session_id, student_number, first_seen) VALUES (?, ?, ?)',
-          [session_id, sn, cnNow()],
+          'INSERT OR IGNORE INTO session_attendees (session_id, student_number, course_name, first_seen) VALUES (?, ?, ?, ?)',
+          [session_id, sn, sessionCourse, cnNow()],
           function (errInsAtt) {
             if (errInsAtt) return res.status(500).json({ error: errInsAtt.message });
             const inserted = this.changes > 0;
             if (!inserted) {
-              // Duplicate within session, do not insert legacy attendance again
-              return res.json({ ok: true, duplicate: true, student_number: sn });
+              // Duplicate within session+course, do not insert legacy attendance again
+              return res.json({ ok: true, duplicate: true, student_number: sn, course_name: sessionCourse });
             }
-            // First time seen in this session -> insert one legacy attendance row for summary compatibility
+            // First time seen in this session+course -> insert one legacy attendance row for summary compatibility
             insertLegacyAttendance(fid, sn);
           }
         );
@@ -443,128 +522,168 @@ router.post('/sessions/override', (_req, res) => {
   res.status(410).json({ error: 'duplicate session override has been disabled' });
 });
 
-// Get detailed statistics for a specific course
+// Get detailed statistics for a specific course (mapping + session_attendees)
 router.get('/stats/course-details/:course', (req, res) => {
   const { course } = req.params;
 
-  // First get total sessions for this course
-  const totalSessionsQuery = `
-    SELECT COUNT(DISTINCT id) as total_sessions
-    FROM sessions
-    WHERE course_name = ?
-  `;
-
-  db.get(totalSessionsQuery, [course], (err, totalResult) => {
-    if (err) {
-      res.status(500).json({ error: err.message });
-      return;
-    }
-
-    const totalSessions = totalResult.total_sessions;
-
-    // Then get attendance details for each student
-    const detailsQuery = `
-      SELECT
-        f.name,
-        f.class,
-        COUNT(DISTINCT a.session_id) as attendance_count,
-        ROUND(CAST(COUNT(DISTINCT a.session_id) AS FLOAT) / NULLIF(?, 0) * 100, 2) as attendance_rate
-      FROM faces f
-      LEFT JOIN attendance a ON f.id = a.face_id
-      LEFT JOIN sessions s ON a.session_id = s.id AND s.course_name = ?
-      WHERE f.course = ?
-      GROUP BY f.id
-      ORDER BY attendance_rate DESC
-    `;
-
-    db.all(detailsQuery, [totalSessions, course, course], (err, rows) => {
-      if (err) {
-        res.status(500).json({ error: err.message });
-        return;
-      }
-      res.json({ details: rows, total_sessions: totalSessions });
-    });
-  });
-});
-
-// Get detailed statistics for a specific class
-router.get('/stats/class-details/:class', (req, res) => {
-  const { class: className } = req.params;
-
-  // Per-student aggregated details for the class:
-  // attendance_rate = (student's total attended sessions in this class) / (sum of total sessions of courses the student took in this class)
-  const query = `
-    WITH student_courses AS (
-      SELECT DISTINCT f.name, f.class, f.course
-      FROM faces f
-      WHERE f.class = ? AND f.course IS NOT NULL
+  const detailsQuery = `
+    WITH enrolled AS (
+      SELECT DISTINCT cs.student_number
+      FROM course_students cs
+      JOIN courses c ON c.course_code = cs.course_code
+      WHERE c.course_name = ?
     ),
-    student_total_sessions AS (
-      SELECT sc.name, sc.class, COUNT(DISTINCT s.id) AS total_sessions
-      FROM student_courses sc
-      JOIN sessions s ON s.class_name = sc.class AND s.course_name = sc.course
-      GROUP BY sc.name, sc.class
+    student_info AS (
+      SELECT s.student_number, s.name, s.class_name
+      FROM students s
+      JOIN enrolled e ON e.student_number = s.student_number
     ),
-    students_in_class AS (
-      SELECT DISTINCT f.name, f.class
-      FROM faces f
-      WHERE f.class = ?
-    ),
-    attendance_per_student AS (
-      SELECT sic.name, sic.class, COUNT(DISTINCT a.session_id) AS attendance_count
-      FROM students_in_class sic
-      LEFT JOIN faces f ON f.name = sic.name AND f.class = sic.class
-      LEFT JOIN attendance a ON a.face_id = f.id
-      LEFT JOIN sessions s ON s.id = a.session_id AND s.class_name = sic.class
-      GROUP BY sic.name, sic.class
+    per_student AS (
+      SELECT si.student_number,
+             COALESCE(COUNT(DISTINCT sa.session_id), 0) AS attendance_count,
+             COALESCE(COUNT(DISTINCT sess.id), 0) AS total_sessions
+      FROM student_info si
+      LEFT JOIN sessions sess
+        ON sess.course_name = ?
+       AND sess.class_name = si.class_name
+      LEFT JOIN session_attendees sa
+        ON sa.session_id = sess.id
+       AND sa.student_number = si.student_number
+       AND sa.course_name = ?
+      GROUP BY si.student_number
     )
-    SELECT aps.name,
-           aps.class,
-           NULL AS course,
-           aps.attendance_count,
-           COALESCE(sts.total_sessions, 0) AS total_sessions,
-           CASE WHEN COALESCE(sts.total_sessions, 0) = 0 THEN 0
-                ELSE ROUND(CAST(aps.attendance_count AS FLOAT) / sts.total_sessions * 100, 2) END AS attendance_rate
-    FROM attendance_per_student aps
-    LEFT JOIN student_total_sessions sts ON sts.name = aps.name AND sts.class = aps.class
+    SELECT
+      si.name,
+      si.class_name AS class,
+      COALESCE(ps.attendance_count, 0) AS attendance_count,
+      COALESCE(ps.total_sessions, 0) AS total_sessions,
+      CASE WHEN COALESCE(ps.total_sessions, 0) = 0
+           THEN 0
+           ELSE ROUND(CAST(ps.attendance_count AS FLOAT) / ps.total_sessions * 100, 2)
+      END AS attendance_rate
+    FROM student_info si
+    LEFT JOIN per_student ps ON ps.student_number = si.student_number
     ORDER BY attendance_rate DESC
   `;
 
-  db.all(query, [className, className], (err, rows) => {
+  console.log('[stats/course-details] course=', course);
+  console.log('[stats/course-details] SQL:\n' + detailsQuery);
+  console.time('[stats/course-details]');
+  db.all(detailsQuery, [course, course, course], (err, rows) => {
+    console.timeEnd('[stats/course-details]');
     if (err) {
+      console.error('[stats/course-details] error:', err.message);
       res.status(500).json({ error: err.message });
       return;
     }
+    console.log('[stats/course-details] rows:', rows ? rows.length : 0);
     res.json({ details: rows });
   });
 });
 
-// Get students overview statistics (grouped by name + class)
-router.get('/stats/students', (req, res) => {
+// Get detailed statistics for a specific class (mapping + session_attendees)
+router.get('/stats/class-details/:class', (req, res) => {
+  const { class: className } = req.params;
+
   const query = `
-    WITH student_overview AS (
-      SELECT f.name, f.class
-      FROM faces f
-      WHERE f.name IS NOT NULL AND f.class IS NOT NULL
-      GROUP BY f.name, f.class
+    WITH students_in_class AS (
+      SELECT s.student_number, s.name, s.class_name AS class
+      FROM students s
+      WHERE s.class_name = ?
     ),
-    courses_count AS (
-      SELECT f.name, f.class, COUNT(DISTINCT f.course) AS courses_count
-      FROM faces f
-      WHERE f.name IS NOT NULL AND f.class IS NOT NULL
-      GROUP BY f.name, f.class
+    student_courses AS (
+      SELECT cs.student_number, cs.course_code
+      FROM course_students cs
     ),
     total_sessions AS (
-      SELECT f.name, f.class, COUNT(DISTINCT s.id) AS total_sessions
-      FROM faces f
-      JOIN sessions s ON s.class_name = f.class AND s.course_name = f.course
-      GROUP BY f.name, f.class
+      SELECT sic.student_number,
+             COUNT(DISTINCT sess.id) AS total_sessions
+      FROM students_in_class sic
+      LEFT JOIN student_courses sc ON sc.student_number = sic.student_number
+      LEFT JOIN courses c ON c.course_code = sc.course_code
+      LEFT JOIN sessions sess
+        ON sess.class_name = sic.class
+       AND sess.course_name = c.course_name
+      GROUP BY sic.student_number
     ),
     attendance_count AS (
-      SELECT f.name, f.class, COUNT(DISTINCT a.session_id) AS attendance_count
-      FROM attendance a
-      JOIN faces f ON f.id = a.face_id
-      GROUP BY f.name, f.class
+      SELECT sic.student_number,
+             COUNT(DISTINCT sa.session_id) AS attendance_count
+      FROM students_in_class sic
+      LEFT JOIN sessions sess ON sess.class_name = sic.class
+      LEFT JOIN session_attendees sa
+        ON sa.session_id = sess.id
+       AND sa.student_number = sic.student_number
+       AND sa.course_name = sess.course_name
+      GROUP BY sic.student_number
+    )
+    SELECT sic.name,
+           sic.class,
+           COALESCE(ac.attendance_count, 0) AS attendance_count,
+           COALESCE(ts.total_sessions, 0) AS total_sessions,
+           CASE WHEN COALESCE(ts.total_sessions, 0) = 0
+                THEN 0
+                ELSE ROUND(CAST(COALESCE(ac.attendance_count, 0) AS FLOAT) / ts.total_sessions * 100, 2)
+           END AS attendance_rate
+    FROM students_in_class sic
+    LEFT JOIN total_sessions ts ON ts.student_number = sic.student_number
+    LEFT JOIN attendance_count ac ON ac.student_number = sic.student_number
+    ORDER BY attendance_rate DESC
+  `;
+
+  console.log('[stats/class-details] class=', className);
+  console.log('[stats/class-details] SQL:\n' + query);
+  console.time('[stats/class-details]');
+  db.all(query, [className], (err, rows) => {
+    console.timeEnd('[stats/class-details]');
+    if (err) {
+      console.error('[stats/class-details] error:', err.message);
+      res.status(500).json({ error: err.message });
+      return;
+    }
+    console.log('[stats/class-details] rows:', rows ? rows.length : 0);
+    res.json({ details: rows });
+  });
+});
+
+// Get students overview statistics (students + course_students + session_attendees)
+router.get('/stats/students', (req, res) => {
+  const query = `
+    /* Attended-course denominator per student within their class */
+    WITH student_overview AS (
+      SELECT student_number, name, class_name AS class
+      FROM students
+      WHERE name IS NOT NULL AND class_name IS NOT NULL
+    ),
+    attended_courses AS (
+      SELECT so.student_number, sa.course_name
+      FROM student_overview so
+      JOIN session_attendees sa ON sa.student_number = so.student_number
+      JOIN sessions sess ON sess.id = sa.session_id
+      WHERE sess.class_name = so.class
+      GROUP BY so.student_number, sa.course_name
+    ),
+    courses_count AS (
+      SELECT student_number, COUNT(DISTINCT course_name) AS courses_count
+      FROM attended_courses
+      GROUP BY student_number
+    ),
+    total_sessions AS (
+      SELECT so.student_number, COUNT(DISTINCT sess.id) AS total_sessions
+      FROM student_overview so
+      LEFT JOIN attended_courses ac ON ac.student_number = so.student_number
+      LEFT JOIN sessions sess
+        ON sess.class_name = so.class
+       AND sess.course_name = ac.course_name
+      GROUP BY so.student_number
+    ),
+    attendance_count AS (
+      SELECT so.student_number, COUNT(DISTINCT sa.session_id) AS attendance_count
+      FROM student_overview so
+      JOIN session_attendees sa ON sa.student_number = so.student_number
+      JOIN sessions sess ON sess.id = sa.session_id
+      WHERE sess.class_name = so.class
+      GROUP BY so.student_number
     )
     SELECT so.name,
            so.class,
@@ -576,17 +695,22 @@ router.get('/stats/students', (req, res) => {
                 ELSE ROUND(CAST(COALESCE(ac.attendance_count, 0) AS FLOAT) / ts.total_sessions * 100, 2)
            END AS attendance_rate
     FROM student_overview so
-    LEFT JOIN courses_count cc ON cc.name = so.name AND cc.class = so.class
-    LEFT JOIN total_sessions ts ON ts.name = so.name AND ts.class = so.class
-    LEFT JOIN attendance_count ac ON ac.name = so.name AND ac.class = so.class
+    LEFT JOIN courses_count cc ON cc.student_number = so.student_number
+    LEFT JOIN total_sessions ts ON ts.student_number = so.student_number
+    LEFT JOIN attendance_count ac ON ac.student_number = so.student_number
     ORDER BY attendance_rate DESC, so.name ASC;
   `;
-
+  
+  console.log('[stats/students] executing SQL:\n' + query);
+  console.time('[stats/students]');
   db.all(query, [], (err, rows) => {
+    console.timeEnd('[stats/students]');
     if (err) {
+      console.error('[stats/students] error:', err.message);
       res.status(500).json({ error: err.message });
       return;
     }
+    console.log('[stats/students] rows:', rows ? rows.length : 0);
     res.json({ students: rows });
   });
 });
@@ -600,36 +724,57 @@ router.get('/stats/student-details', (req, res) => {
   }
 
   const detailsQuery = `
+    /* Student details with attended-course denominator within the student's class */
+    WITH target_student AS (
+      SELECT student_number, class_name AS class
+      FROM students
+      WHERE name = ? AND class_name = ?
+      LIMIT 1
+    ),
+    attended_courses AS (
+      SELECT DISTINCT sa.course_name AS course
+      FROM session_attendees sa
+      JOIN sessions sess ON sess.id = sa.session_id
+      JOIN target_student ts ON ts.student_number = sa.student_number
+      WHERE sess.class_name = ts.class
+    ),
+    per_course AS (
+      SELECT ac.course,
+             COUNT(DISTINCT sa.session_id) AS attendance_count,
+             COUNT(DISTINCT sess.id) AS total_sessions
+      FROM attended_courses ac
+      JOIN target_student ts
+      LEFT JOIN sessions sess
+        ON sess.class_name = ts.class
+       AND sess.course_name = ac.course
+      LEFT JOIN session_attendees sa
+        ON sa.session_id = sess.id
+       AND sa.student_number = ts.student_number
+      GROUP BY ac.course
+    )
     SELECT
-      f.course,
-      COUNT(DISTINCT a.session_id) AS attendance_count,
-      (
-        SELECT COUNT(DISTINCT s.id)
-        FROM sessions s
-        WHERE s.class_name = f.class AND s.course_name = f.course
-      ) AS total_sessions,
-      CASE WHEN (
-        SELECT COUNT(DISTINCT s2.id) FROM sessions s2 WHERE s2.class_name = f.class AND s2.course_name = f.course
-      ) = 0 THEN 0
-      ELSE ROUND(
-        CAST(COUNT(DISTINCT a.session_id) AS FLOAT) /
-        (
-          SELECT COUNT(DISTINCT s3.id) FROM sessions s3 WHERE s3.class_name = f.class AND s3.course_name = f.course
-        ) * 100, 2
-      ) END AS attendance_rate
-    FROM faces f
-    LEFT JOIN attendance a ON a.face_id = f.id
-    WHERE f.name = ? AND f.class = ?
-    GROUP BY f.course
+      pc.course,
+      COALESCE(pc.attendance_count, 0) AS attendance_count,
+      COALESCE(pc.total_sessions, 0) AS total_sessions,
+      CASE WHEN COALESCE(pc.total_sessions, 0) = 0
+           THEN 0
+           ELSE ROUND(CAST(pc.attendance_count AS FLOAT) / pc.total_sessions * 100, 2)
+      END AS attendance_rate
+    FROM per_course pc
     ORDER BY attendance_rate DESC;
   `;
 
+  console.log('[stats/student-details] name=', name, 'class=', className);
+  console.log('[stats/student-details] SQL:\n' + detailsQuery);
+  console.time('[stats/student-details]');
   db.all(detailsQuery, [name, className], (err, rows) => {
+    console.timeEnd('[stats/student-details]');
     if (err) {
+      console.error('[stats/student-details] error:', err.message);
       res.status(500).json({ error: err.message });
       return;
     }
-
+  
     // Aggregate totals
     const totals = rows.reduce((acc, r) => {
       acc.courses += 1;
@@ -638,7 +783,8 @@ router.get('/stats/student-details', (req, res) => {
       return acc;
     }, { courses: 0, total_sessions: 0, attendance_count: 0 });
     const avg_rate = rows.length ? Number((rows.reduce((s, r) => s + (r.attendance_rate || 0), 0) / rows.length).toFixed(2)) : 0;
-
+  
+    console.log('[stats/student-details] rows:', rows ? rows.length : 0, 'totals:', totals, 'avg_rate:', avg_rate);
     res.json({ name, class: className, details: rows, totals: { ...totals, avg_attendance_rate: avg_rate } });
   });
 });

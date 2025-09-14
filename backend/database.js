@@ -87,18 +87,48 @@ db.serialize(() => {
     )
   `);
 
-  // New: session_attendees (unique per session_id + student_number)
+  // New: session_attendees (unique per session_id + student_number + course_name)
   db.run(`
     CREATE TABLE IF NOT EXISTS session_attendees (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
       student_number TEXT NOT NULL,
+      course_name TEXT NOT NULL,
       first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(session_id, student_number),
+      UNIQUE(session_id, student_number, course_name),
       FOREIGN KEY (session_id) REFERENCES sessions (id) ON DELETE CASCADE,
       FOREIGN KEY (student_number) REFERENCES students (student_number) ON DELETE CASCADE
     )
   `);
+
+  // Add course_name column to existing session_attendees if missing
+  db.run(`ALTER TABLE session_attendees ADD COLUMN course_name TEXT`, function (err) {
+    if (err && !String(err.message).toLowerCase().includes('duplicate column')) {
+      console.warn('ALTER TABLE session_attendees ADD COLUMN course_name failed:', err.message);
+    } else {
+      // Migrate existing session_attendees records to populate course_name from sessions
+      db.run(`
+        UPDATE session_attendees
+        SET course_name = (
+          SELECT s.course_name
+          FROM sessions s
+          WHERE s.id = session_attendees.session_id
+        )
+        WHERE course_name IS NULL
+      `, function(migErr) {
+        if (migErr) {
+          console.warn('Failed to migrate existing session_attendees course_name:', migErr.message);
+        } else {
+          console.log(`Migrated ${this.changes} session_attendees records with course_name`);
+        }
+      });
+    }
+  });
+
+  // Drop old unique constraint and create new one (SQLite limitation workaround)
+  db.run(`DROP INDEX IF EXISTS session_attendees_unique`, function() {
+    db.run(`CREATE UNIQUE INDEX IF NOT EXISTS session_attendees_unique ON session_attendees(session_id, student_number, course_name)`);
+  });
 
   // Helpful indexes
   db.run(`CREATE INDEX IF NOT EXISTS idx_attendance_session ON attendance(session_id)`);

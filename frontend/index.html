@@ -99,23 +99,23 @@
 
             <!-- Overall Statistics -->
             <div class="stats-overview card">
-                <h3>Overall Statistics</h3>
+                <h3 data-i18n="stats_overall_title">Overall Statistics</h3>
                 <div class="stats-cards">
                     <div class="stat-card">
                         <div class="stat-number" id="total-students">0</div>
-                        <div class="stat-label">Total Students</div>
+                        <div class="stat-label" data-i18n="stats_total_students">Total Students</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-number" id="total-sessions">0</div>
-                        <div class="stat-label">Total Sessions</div>
+                        <div class="stat-label" data-i18n="stats_total_sessions">Total Sessions</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-number" id="total-attendance">0</div>
-                        <div class="stat-label">Total Attendance</div>
+                        <div class="stat-label" data-i18n="stats_total_attendance">Total Attendance</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-number" id="avg-attendance">0%</div>
-                        <div class="stat-label">Average Attendance</div>
+                        <div class="stat-label" data-i18n="stats_avg_attendance">Average Attendance</div>
                     </div>
                 </div>
             </div>
@@ -126,16 +126,16 @@
             <!-- Statistics Tabs -->
             <div class="card" id="stats-tabs-card">
             <div class="stats-tabs">
-                <button class="tab-button active" onclick="switchStatsTab('course')">By Course</button>
-                <button class="tab-button" onclick="switchStatsTab('class')">By Class</button>
-                <button class="tab-button" onclick="switchStatsTab('student')">Students</button>
+                <button class="tab-button active" onclick="switchStatsTab('course')" data-i18n="stats_by_course">By Course</button>
+                <button class="tab-button" onclick="switchStatsTab('class')" data-i18n="stats_by_class">By Class</button>
+                <button class="tab-button" onclick="switchStatsTab('student')" data-i18n="stats_students_tab">Students</button>
             </div>
 
             <!-- Tab: By Course -->
             <div id="tab-course" class="tab-panel" style="display: block;">
                 <!-- Course search + summary -->
                 <div class="form-group">
-                    <input type="text" id="course-search" class="search-input" placeholder="Search courses..." />
+                    <input type="text" id="course-search" class="search-input" data-i18n="placeholder" placeholder="Search courses..." />
                 </div>
                 <div id="course-summary" class="summary-text"></div>
                 <div id="course-stats-results"></div>
@@ -152,7 +152,7 @@
             <!-- Tab: Students -->
             <div id="tab-student" class="tab-panel" style="display: none;">
                 <div class="form-group">
-                    <input type="text" id="student-search" class="search-input" placeholder="Search students (name/class)..." />
+                    <input type="text" id="student-search" class="search-input" data-i18n="placeholder" placeholder="Search students (name/class)..." />
                 </div>
                 <div id="student-summary" class="summary-text"></div>
                 <div id="student-stats-results"></div>

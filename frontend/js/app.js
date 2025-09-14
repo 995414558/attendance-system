@@ -1425,8 +1425,9 @@ async function showClassDetails(className) {
 
                 row.innerHTML = `
                     <td>${detail.name}</td>
-                    <td>${detail.course || (typeof t === 'function' ? t('stats_all_courses') : '全部课程')}</td>
+                    <td>${detail.class}</td>
                     <td>${detail.attendance_count}</td>
+                    <td>${detail.total_sessions}</td>
                     <td class="${rateClass}">${detail.attendance_rate}%</td>
                 `;
                 table.appendChild(row);
@@ -1617,13 +1618,23 @@ async function stopAttendance() {
 // Statistics functions
 async function loadOverallStats() {
     try {
-        const response = await fetch('/api/attendance/stats/overall');
-        const data = await response.json();
+        const resp = await fetch('/api/attendance/stats/overall');
+        if (!resp.ok) {
+            const text = await resp.text().catch(() => '');
+            throw new Error(`HTTP ${resp.status} ${resp.statusText} ${text ? '- ' + text.slice(0,120) : ''}`);
+        }
+        const ct = resp.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) {
+            const text = await resp.text().catch(() => '');
+            throw new Error(`Unexpected content-type: ${ct || 'unknown'} ${text ? '- ' + text.slice(0,120) : ''}`);
+        }
+        const data = await resp.json();
+        const s = (data && data.stats) ? data.stats : { total_students: 0, total_sessions: 0, total_attendance: 0, avg_attendance_rate: 0 };
 
-        document.getElementById('total-students').textContent = data.stats.total_students;
-        document.getElementById('total-sessions').textContent = data.stats.total_sessions;
-        document.getElementById('total-attendance').textContent = data.stats.total_attendance;
-        document.getElementById('avg-attendance').textContent = data.stats.avg_attendance_rate + '%';
+        const elTs = document.getElementById('total-students');    if (elTs)  elTs.textContent  = s.total_students ?? 0;
+        const elSes = document.getElementById('total-sessions');   if (elSes) elSes.textContent = s.total_sessions ?? 0;
+        const elAtt = document.getElementById('total-attendance'); if (elAtt) elAtt.textContent = s.total_attendance ?? 0;
+        const elAvg = document.getElementById('avg-attendance');   if (elAvg) elAvg.textContent = (s.avg_attendance_rate ?? 0) + '%';
     } catch (error) {
         console.error('Error loading overall stats:', error);
         showMessage('Failed to load overall statistics', 'error');
@@ -1649,7 +1660,7 @@ async function loadCourseStats() {
         results.innerHTML = '';
 
         if (data.stats.length === 0) {
-            results.innerHTML = '<p>No course statistics available</p>';
+            results.innerHTML = `<p>${t('stats_no_course_data')}</p>`;
             return;
         }
 
@@ -1657,11 +1668,11 @@ async function loadCourseStats() {
         table.className = 'stats-table';
         table.innerHTML = `
             <tr>
-                <th>Course</th>
-                <th>Total Students</th>
-                <th>Total Sessions</th>
-                <th>Total Attendance</th>
-                <th>Attendance Rate</th>
+                <th>${t('stats_course_header')}</th>
+                <th>${t('stats_total_students')}</th>
+                <th>${t('stats_total_sessions')}</th>
+                <th>${t('stats_total_attendance')}</th>
+                <th>${t('stats_attendance_rate_header')}</th>
             </tr>
         `;
 
@@ -1696,7 +1707,7 @@ async function loadClassStats() {
         results.innerHTML = '';
 
         if (data.stats.length === 0) {
-            results.innerHTML = '<p>No class statistics available</p>';
+            results.innerHTML = `<p>${t('stats_no_class_data')}</p>`;
             return;
         }
 
@@ -1704,11 +1715,11 @@ async function loadClassStats() {
         table.className = 'stats-table';
         table.innerHTML = `
             <tr>
-                <th>Class</th>
-                <th>Total Students</th>
-                <th>Total Sessions</th>
-                <th>Total Attendance</th>
-                <th>Attendance Rate</th>
+                <th>${t('stats_class_header')}</th>
+                <th>${t('stats_total_students')}</th>
+                <th>${t('stats_total_sessions')}</th>
+                <th>${t('stats_total_attendance')}</th>
+                <th>${t('stats_attendance_rate_header')}</th>
             </tr>
         `;
 
@@ -2368,9 +2379,9 @@ async function showCourseAccordion(courseName, anchor) {
                 const rateClass = d.attendance_rate >= 80 ? 'rate-high' : d.attendance_rate >= 60 ? 'rate-medium' : 'rate-low';
                 return `<tr><td>${d.name}</td><td>${d.class}</td><td>${d.attendance_count}</td><td class="${rateClass}">${d.attendance_rate}%</td></tr>`;
             }).join('');
-            html = `<table class="stats-table"><tr><th>学生姓名</th><th>班级</th><th>考勤次数</th><th>出勤率</th></tr>${rows}</table>`;
+            html = `<table class="stats-table"><tr><th>${t('stats_name_header')}</th><th>${t('stats_class_header')}</th><th>${t('stats_attendance_count_header')}</th><th>${t('stats_attendance_rate_header')}</th></tr>${rows}</table>`;
         } else {
-            html = '<p>暂无学生考勤数据</p>';
+            html = `<p>${t('stats_no_detail_data')}</p>`;
         }
         const tr = anchor.closest('tr');
         const table = tr.closest('table');
@@ -2391,11 +2402,11 @@ async function showClassAccordion(className, anchor) {
         if (data.details && data.details.length) {
             const rows = data.details.map(d => {
                 const rateClass = d.attendance_rate >= 80 ? 'rate-high' : d.attendance_rate >= 60 ? 'rate-medium' : 'rate-low';
-                return `<tr><td>${d.name}</td><td>${d.course}</td><td>${d.attendance_count}</td><td class="${rateClass}">${d.attendance_rate}%</td></tr>`;
+                return `<tr><td>${d.name}</td><td>${d.class}</td><td>${d.attendance_count}</td><td>${d.total_sessions}</td><td class="${rateClass}">${d.attendance_rate}%</td></tr>`;
             }).join('');
-            html = `<table class="stats-table"><tr><th>学生姓名</th><th>课程</th><th>考勤次数</th><th>出勤率</th></tr>${rows}</table>`;
+            html = `<table class="stats-table"><tr><th>${t('stats_name_header')}</th><th>${t('stats_class_header')}</th><th>${t('stats_attendance_count_header')}</th><th>${t('stats_total_sessions')}</th><th>${t('stats_attendance_rate_header')}</th></tr>${rows}</table>`;
         } else {
-            html = '<p>暂无学生考勤数据</p>';
+            html = `<p>${t('stats_no_detail_data')}</p>`;
         }
         const tr = anchor.closest('tr');
         const table = tr.closest('table');
@@ -2422,10 +2433,15 @@ async function showStudentAccordion(name, className, anchor) {
                 const rateClass = d.attendance_rate >= 80 ? 'rate-high' : d.attendance_rate >= 60 ? 'rate-medium' : 'rate-low';
                 return `<tr><td>${d.course}</td><td>${d.attendance_count}</td><td>${d.total_sessions}</td><td class="${rateClass}">${d.attendance_rate}%</td></tr>`;
             }).join('');
-            html = `<div class="summary-text">Courses: ${data.totals?.courses || 0} | Attended: ${data.totals?.attendance_count || 0} | Total Sessions: ${data.totals?.total_sessions || 0} | Avg: ${(Number(data.totals?.avg_attendance_rate || 0)).toFixed(2)}%</div>
-                    <table class="stats-table"><tr><th>Course</th><th>Attended</th><th>Total Sessions</th><th>Attendance Rate</th></tr>${rows}</table>`;
+            const summaryText = t('stats_detail_summary')
+                .replace('{0}', data.totals?.courses || 0)
+                .replace('{1}', data.totals?.attendance_count || 0)
+                .replace('{2}', data.totals?.total_sessions || 0)
+                .replace('{3}', (Number(data.totals?.avg_attendance_rate || 0)).toFixed(2));
+            html = `<div class="summary-text">${summaryText}</div>
+                    <table class="stats-table"><tr><th>${t('stats_course_header')}</th><th>${t('stats_attended_header')}</th><th>${t('stats_total_sessions')}</th><th>${t('stats_attendance_rate_header')}</th></tr>${rows}</table>`;
         } else {
-            html = '<p>暂无课程考勤数据</p>';
+            html = `<p>${t('stats_no_detail_data')}</p>`;
         }
         const tr = anchor.closest('tr');
         const table = tr.closest('table');
@@ -2450,8 +2466,8 @@ function renderCourseStats(filterText = '') {
     const filtered = text ? all.filter(x => String(x.course || '').toLowerCase().includes(text)) : all.slice();
 
     if (filtered.length === 0) {
-        results.innerHTML = '<p>No course statistics available</p>';
-        if (summary) summary.textContent = 'Courses: 0 | Students: 0 | Avg: 0%';
+        results.innerHTML = `<p>${t('stats_no_course_data')}</p>`;
+        if (summary) summary.textContent = t('stats_course_summary').replace('{0}', '0').replace('{1}', '0').replace('{2}', '0');
         return;
     }
 
@@ -2459,11 +2475,11 @@ function renderCourseStats(filterText = '') {
     table.className = 'stats-table';
     table.innerHTML = `
         <tr>
-            <th>Course</th>
-            <th>Total Students</th>
-            <th>Total Sessions</th>
-            <th>Total Attendance</th>
-            <th>Attendance Rate</th>
+            <th>${t('stats_course_header')}</th>
+            <th>${t('stats_total_students')}</th>
+            <th>${t('stats_total_sessions')}</th>
+            <th>${t('stats_total_attendance')}</th>
+            <th>${t('stats_attendance_rate_header')}</th>
         </tr>
     `;
 
@@ -2488,7 +2504,10 @@ function renderCourseStats(filterText = '') {
     results.appendChild(table);
     if (summary) {
         const avg = filtered.length ? (avgAcc / filtered.length).toFixed(2) : '0.00';
-        summary.textContent = `Courses: ${filtered.length} | Students: ${totalStudents} | Avg: ${avg}%`;
+        summary.textContent = t('stats_course_summary')
+            .replace('{0}', filtered.length)
+            .replace('{1}', totalStudents)
+            .replace('{2}', avg);
     }
 }
 
@@ -2532,8 +2551,8 @@ function renderStudentStats(filterText = '') {
     const filtered = text ? all.filter(x => `${x.name || ''} ${x.class || ''}`.toLowerCase().includes(text)) : all.slice();
 
     if (filtered.length === 0) {
-        results.innerHTML = '<p>No student statistics available</p>';
-        if (summary) summary.textContent = 'Students: 0 | Courses: 0 | Avg: 0%';
+        results.innerHTML = `<p>${t('stats_no_student_data')}</p>`;
+        if (summary) summary.textContent = t('stats_student_summary').replace('{0}', '0').replace('{1}', '0').replace('{2}', '0');
         return;
     }
 
@@ -2541,12 +2560,12 @@ function renderStudentStats(filterText = '') {
     table.className = 'stats-table';
     table.innerHTML = `
         <tr>
-            <th>Name</th>
-            <th>Class</th>
-            <th>Courses</th>
-            <th>Attended</th>
-            <th>Total Sessions</th>
-            <th>Attendance Rate</th>
+            <th>${t('stats_name_header')}</th>
+            <th>${t('stats_class_header')}</th>
+            <th>${t('stats_courses_header')}</th>
+            <th>${t('stats_attended_header')}</th>
+            <th>${t('stats_total_sessions')}</th>
+            <th>${t('stats_attendance_rate_header')}</th>
         </tr>
     `;
 
@@ -2575,7 +2594,10 @@ function renderStudentStats(filterText = '') {
     results.appendChild(table);
     if (summary) {
         const avg = filtered.length ? (avgAcc / filtered.length).toFixed(2) : '0.00';
-        summary.textContent = `Students: ${filtered.length} | Courses: ${totalCourses} | Avg: ${avg}%`;
+        summary.textContent = t('stats_student_summary')
+            .replace('{0}', filtered.length)
+            .replace('{1}', totalCourses)
+            .replace('{2}', avg);
     }
 }
 
@@ -2607,10 +2629,10 @@ async function showStudentDrillDown(name, className) {
             table.className = 'stats-table';
             table.innerHTML = `
                 <tr>
-                    <th>Course</th>
-                    <th>Attended</th>
-                    <th>Total Sessions</th>
-                    <th>Attendance Rate</th>
+                    <th>${t('stats_course_header')}</th>
+                    <th>${t('stats_attended_header')}</th>
+                    <th>${t('stats_total_sessions')}</th>
+                    <th>${t('stats_attendance_rate_header')}</th>
                 </tr>
             `;
 
@@ -2627,12 +2649,16 @@ async function showStudentDrillDown(name, className) {
             });
             detailsDiv.appendChild(table);
         } else {
-            detailsDiv.innerHTML = '<p>暂无课程考勤数据</p>';
+            detailsDiv.innerHTML = `<p>${t('stats_no_detail_data')}</p>`;
         }
 
         if (data.totals) {
             const avg = Number(data.totals.avg_attendance_rate || 0).toFixed(2);
-            summaryDiv.textContent = `Courses: ${data.totals.courses} | Attended: ${data.totals.attendance_count} | Total Sessions: ${data.totals.total_sessions} | Avg: ${avg}%`;
+            summaryDiv.textContent = t('stats_detail_summary')
+                .replace('{0}', data.totals.courses)
+                .replace('{1}', data.totals.attendance_count)
+                .replace('{2}', data.totals.total_sessions)
+                .replace('{3}', avg);
         }
 
         document.body.appendChild(modal);
