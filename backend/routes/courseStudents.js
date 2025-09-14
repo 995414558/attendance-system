@@ -58,7 +58,8 @@ router.get('/', async (req, res) => {
 
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
     const rows = await allAsync(
-      `SELECT id, student_number, name, course_name, course_code, created_at
+      `SELECT id, student_number, name, course_name, course_code,
+              strftime('%Y-%m-%d %H:%M:%S', created_at, '+8 hours') AS created_at
        FROM course_students
        ${where}
        ORDER BY created_at DESC`, params
@@ -73,7 +74,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const row = await getAsync(
-      'SELECT id, student_number, name, course_name, course_code, created_at FROM course_students WHERE id = ?',
+      "SELECT id, student_number, name, course_name, course_code, strftime('%Y-%m-%d %H:%M:%S', created_at, '+8 hours') AS created_at FROM course_students WHERE id = ?",
       [req.params.id]
     );
     if (!row) return res.status(404).json({ error: 'Not found' });
@@ -111,7 +112,7 @@ router.post('/', async (req, res) => {
     }
 
     const row = await getAsync(
-      'SELECT id, student_number, name, course_name, course_code, created_at FROM course_students WHERE student_number = ? AND course_code = ?',
+      "SELECT id, student_number, name, course_name, course_code, strftime('%Y-%m-%d %H:%M:%S', created_at, '+8 hours') AS created_at FROM course_students WHERE student_number = ? AND course_code = ?",
       [student_number, course_code]
     );
     res.json({ mapping: row });
@@ -141,7 +142,7 @@ router.put('/:id', async (req, res) => {
     if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
 
     const row = await getAsync(
-      'SELECT id, student_number, name, course_name, course_code, created_at FROM course_students WHERE id = ?',
+      "SELECT id, student_number, name, course_name, course_code, strftime('%Y-%m-%d %H:%M:%S', created_at, '+8 hours') AS created_at FROM course_students WHERE id = ?",
       [req.params.id]
     );
     res.json({ mapping: row });

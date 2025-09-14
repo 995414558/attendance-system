@@ -22,19 +22,60 @@ app.use('/api/students', studentsRoutes);
 app.use('/api/courses', coursesRoutes);
 app.use('/api/course-students', courseStudentsRoutes);
 
-// Serve static files from frontend
-app.use(express.static('../frontend'));
+// Admin route (DB maintenance)
+const adminRoutes = require('./routes/admin');
+app.use('/api/admin', adminRoutes);
+
+// Force /index.html to redirect to /data.html (default landing)
+app.get('/index.html', (req, res) => {
+  res.redirect(302, '/data.html');
+});
+
+// Serve static files from frontend with UTF-8 charset and dev no-cache for text assets
+const frontendDir = path.join(__dirname, '..', 'frontend');
+app.use(express.static(frontendDir, {
+  index: false,
+  setHeaders: (res, filePath) => {
+    const lower = filePath.toLowerCase();
+    const isText = (
+      lower.endsWith('.html') || lower.endsWith('.htm') ||
+      lower.endsWith('.js') || lower.endsWith('.mjs') ||
+      lower.endsWith('.css') || lower.endsWith('.json') ||
+      lower.endsWith('.svg')
+    );
+    if (lower.endsWith('.html') || lower.endsWith('.htm')) {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    } else if (lower.endsWith('.js') || lower.endsWith('.mjs')) {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    } else if (lower.endsWith('.css')) {
+      res.setHeader('Content-Type', 'text/css; charset=utf-8');
+    } else if (lower.endsWith('.json')) {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    } else if (lower.endsWith('.svg')) {
+      res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
+    }
+    // Avoid stale cache when iterating during development
+    if (isText) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+  }
+}));
 
 // Serve uploads (student photos)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Serve face-api.js models from the weights directory
-app.use('/weights', express.static('../../weights'));
+app.use('/weights', express.static(path.join(__dirname, '..', '..', 'weights')));
 
+// Default landing -> data.html with UTF-8
 app.get('/', (req, res) => {
-  // Serve the Data & Register page as the default landing page
-  res.sendFile(path.join(__dirname, '..', 'frontend', 'data.html'));
+  res.set('Content-Type', 'text/html; charset=utf-8');
+  res.sendFile(path.join(frontendDir, 'data.html'));
 });
+
+// /index.html redirect is handled before static middleware
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);

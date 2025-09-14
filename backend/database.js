@@ -54,6 +54,13 @@ db.serialize(() => {
     )
   `);
 
+  // Add class_name column if missing (SQLite allows ADD COLUMN; ignore error if it exists)
+  db.run(`ALTER TABLE students ADD COLUMN class_name TEXT`, function (err) {
+    if (err && !String(err.message).toLowerCase().includes('duplicate column')) {
+      console.warn('ALTER TABLE students ADD COLUMN class_name failed:', err.message);
+    }
+  });
+
   // New: courses table
   db.run(`
     CREATE TABLE IF NOT EXISTS courses (
@@ -80,11 +87,26 @@ db.serialize(() => {
     )
   `);
 
+  // New: session_attendees (unique per session_id + student_number)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS session_attendees (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      student_number TEXT NOT NULL,
+      first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(session_id, student_number),
+      FOREIGN KEY (session_id) REFERENCES sessions (id) ON DELETE CASCADE,
+      FOREIGN KEY (student_number) REFERENCES students (student_number) ON DELETE CASCADE
+    )
+  `);
+
   // Helpful indexes
   db.run(`CREATE INDEX IF NOT EXISTS idx_attendance_session ON attendance(session_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_attendance_face ON attendance(face_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_course_students_student ON course_students(student_number)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_course_students_course ON course_students(course_code)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_session_attendees_session ON session_attendees(session_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_session_attendees_student ON session_attendees(student_number)`);
 });
 
 module.exports = db;

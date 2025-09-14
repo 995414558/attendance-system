@@ -4,25 +4,33 @@ const router = express.Router();
 
 // Get all faces
 router.get('/', (req, res) => {
-  db.all('SELECT * FROM faces', [], (err, rows) => {
-    if (err) {
-      res.status(500).json({ error: err.message });
-      return;
+  db.all(
+    "SELECT id, label, descriptors, class, name, course, strftime('%Y-%m-%d %H:%M:%S', created_at, '+8 hours') AS created_at FROM faces",
+    [],
+    (err, rows) => {
+      if (err) {
+        res.status(500).json({ error: err.message });
+        return;
+      }
+      res.json({ faces: rows });
     }
-    res.json({ faces: rows });
-  });
+  );
 });
 
 // Get face by ID
 router.get('/:id', (req, res) => {
   const { id } = req.params;
-  db.get('SELECT * FROM faces WHERE id = ?', [id], (err, row) => {
-    if (err) {
-      res.status(500).json({ error: err.message });
-      return;
+  db.get(
+    "SELECT id, label, descriptors, class, name, course, strftime('%Y-%m-%d %H:%M:%S', created_at, '+8 hours') AS created_at FROM faces WHERE id = ?",
+    [id],
+    (err, row) => {
+      if (err) {
+        res.status(500).json({ error: err.message });
+        return;
+      }
+      res.json({ face: row });
     }
-    res.json({ face: row });
-  });
+  );
 });
 
 // Create new face

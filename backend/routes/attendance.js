@@ -2,6 +2,18 @@ const express = require('express');
 const db = require('../database');
 const router = express.Router();
 
+// CN timezone helpers (store DB times in Asia/Shanghai)
+function formatCN(dateInput) {
+  const d0 = dateInput ? new Date(dateInput) : new Date();
+  // Normalize to UTC then add +08:00 (China has no DST)
+  const utcMs = d0.getTime() + d0.getTimezoneOffset() * 60000;
+  const cnMs = utcMs + 8 * 60 * 60000;
+  const d = new Date(cnMs);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+function cnNow() { return formatCN(new Date()); }
+
 // Get all attendance records
 router.get('/', (req, res) => {
   const { session_id, face_id } = req.query;
@@ -54,20 +66,74 @@ router.get('/summary/:session_id', (req, res) => {
     res.json({ summary: rows });
   });
 });
+// Get attendees list for a session (from session_attendees)
+// Returns: { attendees: [{ session_id, student_number, name, class_name, course_name, photo_path }] }
+router.get('/session/:session_id', (req, res) => {
+  const { session_id } = req.params;
+  const sql = `
+    SELECT 
+      sa.session_id,
+      sa.student_number,
+      st.name,
+      st.class_name,
+      ss.course_name,
+      st.photo_path
+    FROM session_attendees sa
+    LEFT JOIN students st ON st.student_number = sa.student_number
+    LEFT JOIN sessions ss ON ss.id = sa.session_id
+    WHERE sa.session_id = ?
+    ORDER BY COALESCE(st.class_name, ''), COALESCE(st.name, ''), sa.student_number
+  `;
+  db.all(sql, [session_id], (err, rows) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json({ attendees: rows || [] });
+  });
+});
+
+// Count attendance by face_id (total history)
+router.get('/count/:face_id', (req, res) => {
+  const { face_id } = req.params;
+  db.get('SELECT COUNT(*) as count FROM attendance WHERE face_id = ?', [face_id], (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ count: (row && row.count) || 0 });
+  });
+});
 
 // Get statistics by course
 router.get('/stats/by-course', (req, res) => {
   const query = `
+    WITH course_sessions AS (
+      SELECT course_name AS course, COUNT(DISTINCT id) AS total_sessions
+      FROM sessions
+      GROUP BY course_name
+    ),
+    students_in_course AS (
+      SELECT DISTINCT f.name, f.class, f.course
+      FROM faces f
+      WHERE f.course IS NOT NULL
+    ),
+    per_student AS (
+      SELECT sic.course,
+             sic.name,
+             sic.class,
+             COUNT(DISTINCT a.session_id) AS attended
+      FROM students_in_course sic
+      LEFT JOIN faces f ON f.name = sic.name AND f.class = sic.class AND f.course = sic.course
+      LEFT JOIN attendance a ON a.face_id = f.id
+      LEFT JOIN sessions s ON s.id = a.session_id AND s.course_name = sic.course
+      GROUP BY sic.course, sic.name, sic.class
+    )
     SELECT
-      s.course_name as course,
-      COUNT(DISTINCT f.id) as total_students,
-      COUNT(DISTINCT s.id) as total_sessions,
-      COUNT(DISTINCT a.id) as total_attendance,
-      ROUND(CAST(COUNT(DISTINCT a.id) AS FLOAT) / NULLIF(COUNT(DISTINCT s.id), 0) * 100, 2) as attendance_rate
-    FROM sessions s
-    LEFT JOIN faces f ON f.class = s.class_name AND f.course = s.course_name
-    LEFT JOIN attendance a ON a.session_id = s.id
-    GROUP BY s.course_name
+      cs.course,
+      COUNT(DISTINCT ps.name || '|' || ps.class) AS total_students,
+      cs.total_sessions,
+      COALESCE(SUM(ps.attended), 0) AS total_attendance,
+      ROUND(AVG(CASE WHEN cs.total_sessions = 0 THEN 0 ELSE CAST(ps.attended AS FLOAT) / cs.total_sessions END) * 100, 2) AS attendance_rate
+    FROM course_sessions cs
+    LEFT JOIN per_student ps ON ps.course = cs.course
+    GROUP BY cs.course
     ORDER BY attendance_rate DESC
   `;
 
@@ -83,16 +149,35 @@ router.get('/stats/by-course', (req, res) => {
 // Get statistics by class
 router.get('/stats/by-class', (req, res) => {
   const query = `
+    WITH class_sessions AS (
+      SELECT class_name AS class, COUNT(DISTINCT id) AS total_sessions
+      FROM sessions
+      GROUP BY class_name
+    ),
+    students_in_class AS (
+      SELECT DISTINCT f.name, f.class
+      FROM faces f
+      WHERE f.class IS NOT NULL
+    ),
+    per_student AS (
+      SELECT sic.class,
+             sic.name,
+             COUNT(DISTINCT a.session_id) AS attended
+      FROM students_in_class sic
+      LEFT JOIN faces f ON f.name = sic.name AND f.class = sic.class
+      LEFT JOIN attendance a ON a.face_id = f.id
+      LEFT JOIN sessions s ON s.id = a.session_id AND s.class_name = sic.class
+      GROUP BY sic.class, sic.name
+    )
     SELECT
-      s.class_name as class,
-      COUNT(DISTINCT f.id) as total_students,
-      COUNT(DISTINCT s.id) as total_sessions,
-      COUNT(DISTINCT a.id) as total_attendance,
-      ROUND(CAST(COUNT(DISTINCT a.id) AS FLOAT) / NULLIF(COUNT(DISTINCT s.id), 0) * 100, 2) as attendance_rate
-    FROM sessions s
-    LEFT JOIN faces f ON f.class = s.class_name AND f.course = s.course_name
-    LEFT JOIN attendance a ON a.session_id = s.id
-    GROUP BY s.class_name
+      cs.class,
+      COUNT(DISTINCT ps.name) AS total_students,
+      cs.total_sessions,
+      COALESCE(SUM(ps.attended), 0) AS total_attendance,
+      ROUND(AVG(CASE WHEN cs.total_sessions = 0 THEN 0 ELSE CAST(ps.attended AS FLOAT) / cs.total_sessions END) * 100, 2) AS attendance_rate
+    FROM class_sessions cs
+    LEFT JOIN per_student ps ON ps.class = cs.class
+    GROUP BY cs.class
     ORDER BY attendance_rate DESC
   `;
 
@@ -142,67 +227,115 @@ router.get('/stats/overall', (req, res) => {
   executeQueries(Object.keys(queries));
 });
 
-// Record attendance with enrollment validation (students-courses mapping)
+// Record attendance with per-session de-duplication by student_number
+// Accepts: { session_id, student_number?, face_id? }
+// Behavior:
+// - If student_number provided: UPSERT into session_attendees (session_id, student_number) UNIQUE.
+//   On first insert, also insert a single legacy attendance row (face_id + session_id) for summary compatibility.
+// - If only face_id provided: try to resolve student_number via (faces.name,class) -> students.
+//   If resolved, same as above; otherwise fallback to legacy dedupe by (face_id, session_id).
 router.post('/', (req, res) => {
-  const { face_id, session_id } = req.body;
-  if (!face_id || !session_id) {
-    return res.status(400).json({ error: 'face_id and session_id are required' });
+  const { face_id, session_id, student_number } = req.body || {};
+  if (!session_id || (!student_number && !face_id)) {
+    return res.status(400).json({ error: 'session_id and (student_number or face_id) are required' });
   }
 
-  // Resolve face and session
-  db.get('SELECT id, name, class, course FROM faces WHERE id = ?', [face_id], (err, faceRow) => {
-    if (err) {
-      res.status(500).json({ error: err.message });
-      return;
-    }
-    if (!faceRow) {
-      return res.status(404).json({ error: 'Face not found' });
-    }
+  // Verify session exists
+  db.get('SELECT id FROM sessions WHERE id = ?', [session_id], (errSession, sessionRow) => {
+    if (errSession) return res.status(500).json({ error: errSession.message });
+    if (!sessionRow) return res.status(404).json({ error: 'Session not found' });
 
-    db.get('SELECT id, class_name, course_name FROM sessions WHERE id = ?', [session_id], (err2, sessionRow) => {
-      if (err2) {
-        res.status(500).json({ error: err2.message });
-        return;
-      }
-      if (!sessionRow) {
-        return res.status(404).json({ error: 'Session not found' });
-      }
-
-      // Enrollment validation using course_students mapping by course_name and student name
-      db.get(
-        'SELECT 1 FROM course_students WHERE course_name = ? AND name = ? LIMIT 1',
-        [sessionRow.course_name, faceRow.name],
-        (err3, mapRow) => {
-          if (err3) {
-            res.status(500).json({ error: err3.message });
-            return;
+    const insertLegacyAttendance = (finalFaceId, sn) => {
+      // If no face id, try to derive one from student for legacy summary
+      const doInsert = (fid) => {
+        if (!fid) {
+          // No face available; still acknowledge session attendee insertion
+          return res.json({ ok: true, inserted: true, student_number: sn, face_id: null });
+        }
+        db.run(
+          'INSERT INTO attendance (face_id, session_id, timestamp) VALUES (?, ?, ?)',
+          [fid, session_id, cnNow()],
+          function (errIns) {
+            if (errIns) return res.status(500).json({ error: errIns.message });
+            res.json({ ok: true, inserted: true, id: this.lastID, student_number: sn, face_id: fid });
           }
+        );
+      };
 
-          if (!mapRow) {
-            // Legacy fallback: allow if legacy faces.course matches session.course_name
-            if (faceRow.course !== sessionRow.course_name) {
-              return res.status(400).json({
-                error: 'Student is not enrolled in this course',
-                details: { student_name: faceRow.name, course_name: sessionRow.course_name }
-              });
+      if (finalFaceId) return doInsert(finalFaceId);
+
+      // Derive face_id by matching student.name + student.class_name with faces
+      db.get(`
+        SELECT f.id AS face_id
+        FROM faces f
+        JOIN students s ON s.name = f.name AND s.class_name = f.class
+        WHERE s.student_number = ?
+        LIMIT 1
+      `, [sn], (errFind, rowFind) => {
+        if (errFind) return res.status(500).json({ error: errFind.message });
+        doInsert(rowFind && rowFind.face_id);
+      });
+    };
+
+    const proceedWithSN = (sn, fid) => {
+      // Ensure student exists
+      db.get('SELECT student_number FROM students WHERE student_number = ?', [sn], (errStu, stuRow) => {
+        if (errStu) return res.status(500).json({ error: errStu.message });
+        if (!stuRow) return res.status(404).json({ error: 'Student not found' });
+
+        // Insert or ignore session attendee (de-dup per session_id + student_number)
+        db.run(
+          'INSERT OR IGNORE INTO session_attendees (session_id, student_number, first_seen) VALUES (?, ?, ?)',
+          [session_id, sn, cnNow()],
+          function (errInsAtt) {
+            if (errInsAtt) return res.status(500).json({ error: errInsAtt.message });
+            const inserted = this.changes > 0;
+            if (!inserted) {
+              // Duplicate within session, do not insert legacy attendance again
+              return res.json({ ok: true, duplicate: true, student_number: sn });
             }
+            // First time seen in this session -> insert one legacy attendance row for summary compatibility
+            insertLegacyAttendance(fid, sn);
           }
+        );
+      });
+    };
 
-          // Passed validation, insert attendance
-          db.run(
-            'INSERT INTO attendance (face_id, session_id) VALUES (?, ?)',
+    if (student_number) {
+      proceedWithSN(student_number, face_id || null);
+    } else {
+      // Resolve student_number from face_id via name + class_name
+      db.get(`
+        SELECT s.student_number AS sn
+        FROM faces f
+        JOIN students s ON s.name = f.name AND s.class_name = f.class
+        WHERE f.id = ?
+        LIMIT 1
+      `, [face_id], (errResolve, rowResolve) => {
+        if (errResolve) return res.status(500).json({ error: errResolve.message });
+        if (rowResolve && rowResolve.sn) {
+          proceedWithSN(rowResolve.sn, face_id);
+        } else {
+          // Legacy fallback: de-dup by (face_id, session_id)
+          db.get(
+            'SELECT 1 FROM attendance WHERE face_id = ? AND session_id = ? LIMIT 1',
             [face_id, session_id],
-            function (err4) {
-              if (err4) {
-                res.status(500).json({ error: err4.message });
-                return;
-              }
-              res.json({ id: this.lastID });
+            (errChk, exists) => {
+              if (errChk) return res.status(500).json({ error: errChk.message });
+              if (exists) return res.json({ ok: true, duplicate: true, legacy: true });
+              db.run(
+                'INSERT INTO attendance (face_id, session_id, timestamp) VALUES (?, ?, ?)',
+                [face_id, session_id, cnNow()],
+                function (errIns) {
+                  if (errIns) return res.status(500).json({ error: errIns.message });
+                  res.json({ ok: true, legacy: true, id: this.lastID });
+                }
+              );
             }
           );
         }
-      );
-    });
+      });
+    }
   });
 });
 
@@ -256,119 +389,58 @@ router.get('/sessions', (req, res) => {
 router.post('/sessions', (req, res) => {
   const { class_name, course_name, start_time } = req.body;
   const sessionId = `${class_name}-${course_name}(${start_time})`;
+  const start_time_cn = formatCN(start_time);
 
-  // Check for duplicate sessions within 40 minutes
-  const checkQuery = `
-    SELECT id, start_time
-    FROM sessions
-    WHERE class_name = ? AND course_name = ?
-      AND start_time >= datetime(?, '-40 minutes')
-      AND start_time <= datetime(?, '+40 minutes')
-    ORDER BY start_time DESC
-    LIMIT 1
-  `;
-
-  db.get(checkQuery, [class_name, course_name, start_time, start_time], (err, row) => {
-    if (err) {
-      res.status(500).json({ error: err.message });
-      return;
-    }
-
-    if (row) {
-      // Found a duplicate session within 40 minutes
-      res.json({
-        duplicate: true,
-        existing_session: row,
-        message: '在40分钟内发现相同的考勤会话，是否要覆盖上一次记录？'
-      });
-      return;
-    }
-
-    // No duplicate found, create new session
-    db.run(
-      'INSERT INTO sessions (id, class_name, course_name, start_time, status) VALUES (?, ?, ?, ?, ?)',
-      [sessionId, class_name, course_name, start_time, 'active'],
-      function(err) {
-        if (err) {
-          res.status(500).json({ error: err.message });
-          return;
+  db.run(
+    'INSERT INTO sessions (id, class_name, course_name, start_time, status) VALUES (?, ?, ?, ?, ?)',
+    [sessionId, class_name, course_name, start_time_cn, 'active'],
+    function (err) {
+      if (err) {
+        // If primary key conflict, append a unique suffix and try once
+        if (String(err.message || '').toLowerCase().includes('unique')) {
+          const uniqueId = `${sessionId}#${Date.now()}`;
+          db.run(
+            'INSERT INTO sessions (id, class_name, course_name, start_time, status) VALUES (?, ?, ?, ?, ?)',
+            [uniqueId, class_name, course_name, start_time_cn, 'active'],
+            function (err2) {
+              if (err2) return res.status(500).json({ error: err2.message });
+              return res.json({ id: uniqueId, duplicate: false });
+            }
+          );
+        } else {
+          return res.status(500).json({ error: err.message });
         }
+      } else {
         res.json({ id: sessionId, duplicate: false });
       }
-    );
-  });
+    }
+  );
 });
 
 router.put('/sessions/:id/end', (req, res) => {
    const { id } = req.params;
    const { end_time } = req.body;
+   const end_cn = formatCN(end_time);
 
    // Update session with end time and change status to completed
+   // Do NOT mutate primary key (id) to keep references intact.
    db.run(
      'UPDATE sessions SET end_time = ?, status = ? WHERE id = ?',
-     [end_time, 'completed', id],
+     [end_cn, 'completed', id],
      function(err) {
        if (err) {
          res.status(500).json({ error: err.message });
          return;
        }
-
-       // Generate final session ID with time range
-       const finalSessionId = `${id.split('(')[0]}(${id.split('(')[1].split(')')[0]} - ${end_time})`;
-
-       // Update the session ID to include end time
-       db.run(
-         'UPDATE sessions SET id = ? WHERE id = ?',
-         [finalSessionId, id],
-         function(err2) {
-           if (err2) {
-             res.status(500).json({ error: err2.message });
-             return;
-           }
-           res.json({ final_session_id: finalSessionId });
-         }
-       );
+       res.json({ ok: true, id, end_time: end_cn });
      }
    );
  });
 
 // Override duplicate session
-router.post('/sessions/override', (req, res) => {
-  const { existing_session_id, new_session_data } = req.body;
-  const { class_name, course_name, start_time } = new_session_data;
-  const newSessionId = `${class_name}-${course_name}(${start_time})`;
-
-  // Delete existing session and its attendance records
-  db.run('DELETE FROM attendance WHERE session_id = ?', [existing_session_id], function(err) {
-    if (err) {
-      res.status(500).json({ error: err.message });
-      return;
-    }
-
-    // Delete the existing session
-    db.run('DELETE FROM sessions WHERE id = ?', [existing_session_id], function(err) {
-      if (err) {
-        res.status(500).json({ error: err.message });
-        return;
-      }
-
-      // Create new session
-      db.run(
-        'INSERT INTO sessions (id, class_name, course_name, start_time, status) VALUES (?, ?, ?, ?, ?)',
-        [newSessionId, class_name, course_name, start_time, 'active'],
-        function(err) {
-          if (err) {
-            res.status(500).json({ error: err.message });
-            return;
-          }
-          res.json({
-            id: newSessionId,
-            message: '已覆盖上一次考勤会话，原有记录已被清除'
-          });
-        }
-      );
-    });
-  });
+router.post('/sessions/override', (_req, res) => {
+  // Duplicate-session override has been disabled per requirements.
+  res.status(410).json({ error: 'duplicate session override has been disabled' });
 });
 
 // Get detailed statistics for a specific course
@@ -419,43 +491,51 @@ router.get('/stats/course-details/:course', (req, res) => {
 router.get('/stats/class-details/:class', (req, res) => {
   const { class: className } = req.params;
 
-  // First get total sessions for this class
-  const totalSessionsQuery = `
-    SELECT COUNT(DISTINCT id) as total_sessions
-    FROM sessions
-    WHERE class_name = ?
+  // Per-student aggregated details for the class:
+  // attendance_rate = (student's total attended sessions in this class) / (sum of total sessions of courses the student took in this class)
+  const query = `
+    WITH student_courses AS (
+      SELECT DISTINCT f.name, f.class, f.course
+      FROM faces f
+      WHERE f.class = ? AND f.course IS NOT NULL
+    ),
+    student_total_sessions AS (
+      SELECT sc.name, sc.class, COUNT(DISTINCT s.id) AS total_sessions
+      FROM student_courses sc
+      JOIN sessions s ON s.class_name = sc.class AND s.course_name = sc.course
+      GROUP BY sc.name, sc.class
+    ),
+    students_in_class AS (
+      SELECT DISTINCT f.name, f.class
+      FROM faces f
+      WHERE f.class = ?
+    ),
+    attendance_per_student AS (
+      SELECT sic.name, sic.class, COUNT(DISTINCT a.session_id) AS attendance_count
+      FROM students_in_class sic
+      LEFT JOIN faces f ON f.name = sic.name AND f.class = sic.class
+      LEFT JOIN attendance a ON a.face_id = f.id
+      LEFT JOIN sessions s ON s.id = a.session_id AND s.class_name = sic.class
+      GROUP BY sic.name, sic.class
+    )
+    SELECT aps.name,
+           aps.class,
+           NULL AS course,
+           aps.attendance_count,
+           COALESCE(sts.total_sessions, 0) AS total_sessions,
+           CASE WHEN COALESCE(sts.total_sessions, 0) = 0 THEN 0
+                ELSE ROUND(CAST(aps.attendance_count AS FLOAT) / sts.total_sessions * 100, 2) END AS attendance_rate
+    FROM attendance_per_student aps
+    LEFT JOIN student_total_sessions sts ON sts.name = aps.name AND sts.class = aps.class
+    ORDER BY attendance_rate DESC
   `;
 
-  db.get(totalSessionsQuery, [className], (err, totalResult) => {
+  db.all(query, [className, className], (err, rows) => {
     if (err) {
       res.status(500).json({ error: err.message });
       return;
     }
-
-    const totalSessions = totalResult.total_sessions;
-
-    // Then get attendance details for each student
-    const detailsQuery = `
-      SELECT
-        f.name,
-        f.course,
-        COUNT(DISTINCT a.session_id) as attendance_count,
-        ROUND(CAST(COUNT(DISTINCT a.session_id) AS FLOAT) / NULLIF(?, 0) * 100, 2) as attendance_rate
-      FROM faces f
-      LEFT JOIN attendance a ON f.id = a.face_id
-      LEFT JOIN sessions s ON a.session_id = s.id AND s.class_name = ?
-      WHERE f.class = ?
-      GROUP BY f.id
-      ORDER BY attendance_rate DESC
-    `;
-
-    db.all(detailsQuery, [totalSessions, className, className], (err, rows) => {
-      if (err) {
-        res.status(500).json({ error: err.message });
-        return;
-      }
-      res.json({ details: rows, total_sessions: totalSessions });
-    });
+    res.json({ details: rows });
   });
 });
 

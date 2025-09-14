@@ -52,7 +52,7 @@ function extractCourseRecord(row) {
 router.get('/', async (_req, res) => {
   try {
     const rows = await allAsync(
-      'SELECT id, course_code, course_name, course_hours, created_at FROM courses ORDER BY created_at DESC'
+      "SELECT id, course_code, course_name, course_hours, strftime('%Y-%m-%d %H:%M:%S', created_at, '+8 hours') AS created_at FROM courses ORDER BY created_at DESC"
     );
     res.json({ courses: rows });
   } catch (err) {
@@ -64,7 +64,7 @@ router.get('/', async (_req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const row = await getAsync(
-      'SELECT id, course_code, course_name, course_hours, created_at FROM courses WHERE id = ?',
+      "SELECT id, course_code, course_name, course_hours, strftime('%Y-%m-%d %H:%M:%S', created_at, '+8 hours') AS created_at FROM courses WHERE id = ?",
       [req.params.id]
     );
     if (!row) return res.status(404).json({ error: 'Not found' });
@@ -86,7 +86,7 @@ router.post('/', async (req, res) => {
       'INSERT INTO courses (course_code, course_name, course_hours) VALUES (?, ?, ?)',
       [String(course_code).trim(), String(course_name).trim(), Number.isNaN(hours) ? null : hours]
     );
-    const created = await getAsync('SELECT * FROM courses WHERE course_code = ?', [String(course_code).trim()]);
+    const created = await getAsync("SELECT id, course_code, course_name, course_hours, strftime('%Y-%m-%d %H:%M:%S', created_at, '+8 hours') AS created_at FROM courses WHERE course_code = ?", [String(course_code).trim()]);
     res.json({ course: created });
   } catch (err) {
     if (String(err.message).includes('UNIQUE')) {
@@ -118,7 +118,7 @@ router.put('/:id', async (req, res) => {
     const result = await runAsync(`UPDATE courses SET ${updates.join(', ')} WHERE id = ?`, params);
     if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
 
-    const row = await getAsync('SELECT * FROM courses WHERE id = ?', [req.params.id]);
+    const row = await getAsync("SELECT id, course_code, course_name, course_hours, strftime('%Y-%m-%d %H:%M:%S', created_at, '+8 hours') AS created_at FROM courses WHERE id = ?", [req.params.id]);
     res.json({ course: row });
   } catch (err) {
     if (String(err.message).includes('UNIQUE')) {

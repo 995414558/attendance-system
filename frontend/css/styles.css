@@ -145,6 +145,17 @@ canvas {
     background-color: #e9ecef;
 }
 
+/* Attendance log status variants */
+.attendance-item.pending {
+    background-color: #fff8e1;
+    border-left: 3px solid #ffc107;
+    color: #7a5d00;
+}
+.attendance-item.uploaded {
+    background-color: #e8f5e9;
+    border-left: 3px solid #28a745;
+    color: #1b5e20;
+}
 /* Statistics table styles */
 .stats-table {
     width: 100%;
@@ -454,4 +465,67 @@ canvas {
 .data-section h3 {
     margin: 0 0 10px 0;
     color: #2c3e50;
+}
+
+/* Brand logo in navbar */
+.nav-container .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.nav-container .brand .site-logo {
+    height: 40px;
+    width: auto;
+    display: block;
+    object-fit: contain;
+}
+.nav-container .brand h1 {
+    margin: 0;
+}
+@media (max-width: 640px) {
+    .nav-container .brand .site-logo { height: 28px; }
+    nav h1 { font-size: 18px; }
+}
+
+/* Larger selects and filter inputs for attendance controls */
+.large-select {
+    width: 360px;
+    min-width: 260px;
+    max-width: 100%;
+    padding: 10px 12px;
+    font-size: 16px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    background-color: #fff;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.large-select:focus {
+    border-color: #3498db;
+    box-shadow: 0 0 0 3px rgba(52,152,219,0.15);
+}
+
+.select-filter {
+    width: 360px;
+    min-width: 260px;
+    max-width: 100%;
+    padding: 8px 10px;
+    margin: 4px 0 6px 0;
+    font-size: 14px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    outline: none;
+    background-color: #fff;
+}
+.select-filter:focus {
+    border-color: #3498db;
+    box-shadow: 0 0 0 3px rgba(52,152,219,0.12);
+}
+
+@media (max-width: 640px) {
+    .large-select,
+    .select-filter {
+        width: 100%;
+        min-width: 0;
+    }
 }

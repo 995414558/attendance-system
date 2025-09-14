@@ -15,7 +15,6 @@
       <ul>
         <li><a href="data.html" data-i18n="nav_data_register">Data & Register</a></li>
         <li><a href="attendance.html" data-i18n="nav_attendance">Take Attendance</a></li>
-        <li><a href="batch.html" data-i18n="nav_batch">Batch Processing</a></li>
         <li><a href="reports.html" data-i18n="nav_reports">Reports</a></li>
         <li><a href="statistics.html" data-i18n="nav_statistics">Statistics</a></li>
       </ul>
@@ -24,93 +23,145 @@
 
   <main>
     <div id="data-page" class="page">
-      <h2 data-i18n="data_title">Data Management</h2>
+      <h2>数据与注册</h2>
 
-      <!-- Face Registration -->
-      <section class="data-section">
-        <h3 data-i18n="data_face_reg_title">Face Registration</h3>
-        <div class="form-group">
-          <label for="student-class" data-i18n="register_class">Class:</label>
-          <input type="text" id="student-class" placeholder="e.g., Grade 10A">
+      <div class="card" id="data-tabs-card">
+        <div class="stats-tabs">
+          <button class="tab-button active" onclick="switchDataTab('reg')">面部注册</button>
+          <button class="tab-button" onclick="switchDataTab('students')">学生导入</button>
+          <button class="tab-button" onclick="switchDataTab('courses')">课程导入</button>
+          <button class="tab-button" onclick="switchDataTab('preview')">数据预览</button>
         </div>
-        <div class="form-group">
-          <label for="student-name" data-i18n="register_name">Name:</label>
-          <input type="text" id="student-name" placeholder="e.g., Alice Smith">
-        </div>
-        <div class="form-group">
-          <label for="student-course" data-i18n="register_course">Course:</label>
-          <input type="text" id="student-course" placeholder="e.g., Physics">
-        </div>
-        <div class="form-group">
-          <button onclick="startWebcamRegistration()" data-i18n="register_webcam_btn">Start Webcam Registration</button>
-          <input type="file" id="image-upload" accept="image/*" onchange="registerFromImage()">
-          <span class="hint" data-i18n="hint_register_image">You can also upload a single image to register.</span>
-        </div>
-        <video id="registration-video" autoplay muted></video>
-        <canvas id="registration-canvas"></canvas>
-        <button id="capture-btn" onclick="captureFace()" style="display: none;" data-i18n="register_capture_btn">Capture Face</button>
-      </section>
 
-      <!-- Students -->
-      <section class="data-section">
-        <h3 data-i18n="data_students_title">Students</h3>
-        <div class="form-group">
-          <label for="student-folder" data-i18n="label_student_folder">Import from Folder (文件夹导入):</label>
-          <input type="file" id="student-folder" webkitdirectory directory multiple accept=".jpg,.jpeg,.png">
-          <button onclick="importStudentsFromFolder()" data-i18n="btn_import_students">Import Students</button>
-          <p class="hint" data-i18n="hint_student_folder">How to use: Click “Choose Folder” and select the folder containing student photos. Filename format: 学号-姓名.jpg/png, e.g. 20230001-张三.jpg</p>
+        <!-- Tab: Face Registration -->
+        <div id="tab-data-reg" class="tab-panel" style="display: block;">
+          <section class="data-section">
+            <h3>面部注册</h3>
+            <div class="form-group">
+              <label for="student-class">班级:</label>
+              <input type="text" id="student-class" placeholder="例：大数据1班">
+            </div>
+            <div class="form-group">
+              <label for="student-number">学号:</label>
+              <input type="text" id="student-number" placeholder="例：20230001">
+            </div>
+            <div class="form-group">
+              <label for="student-name">姓名:</label>
+              <input type="text" id="student-name" placeholder="例：张三">
+            </div>
+            <div class="form-group">
+              <button onclick="startWebcamRegistration()">启动摄像头注册</button>
+              <input type="file" id="image-upload" accept="image/*" onchange="registerFromImage()">
+              <span class="hint">也可以上传单张图片进行注册。</span>
+            </div>
+            <video id="registration-video" autoplay muted></video>
+            <canvas id="registration-canvas"></canvas>
+            <button id="capture-btn" onclick="captureFace()" style="display: none;">捕获面部</button>
+          </section>
         </div>
-        <div class="form-group">
-          <label data-i18n="label_manual_create">Manual Create:</label>
-          <input type="text" id="student-number-input" placeholder="学号 (student number)">
-          <input type="text" id="student-name-input" placeholder="姓名 (name)">
-          <select id="student-gender-input">
-            <option value="" data-i18n="placeholder_gender">性别 (gender)</option>
-            <option value="male" data-i18n="gender_male">男</option>
-            <option value="female" data-i18n="gender_female">女</option>
-            <option value="other" data-i18n="gender_other">其他</option>
-          </select>
-          <button onclick="submitNewStudent()" data-i18n="btn_create_student">Create Student</button>
-          <p class="hint" data-i18n="hint_student_note">Note: Students support folder import by filename format; no Excel import is required.</p>
-        </div>
-      </section>
 
-      <!-- Courses -->
-      <section class="data-section">
-        <h3 data-i18n="data_courses_title">Courses</h3>
-        <div class="form-group">
-          <label for="courses-excel" data-i18n="label_courses_excel">Import from Excel (课程编号/课程名称/课程学时):</label>
-          <input type="file" id="courses-excel" accept=".xls,.xlsx">
-          <button onclick="importCoursesFromExcel()" data-i18n="btn_import_courses">Import Courses</button>
-          <p class="hint" data-i18n="hint_course_excel">Excel columns required: 课程编号, 课程名称, 课程学时. English headers also supported: course_code, course_name, course_hours.</p>
-        </div>
-        <div class="form-group">
-          <label data-i18n="label_manual_create">Manual Create:</label>
-          <input type="text" id="course-code-input" placeholder="课程编号 (course code)">
-          <input type="text" id="course-name-input" placeholder="课程名称 (course name)">
-          <input type="number" id="course-hours-input" placeholder="课程学时 (course hours)">
-          <button onclick="submitNewCourse()" data-i18n="btn_create_course">Create Course</button>
-        </div>
-      </section>
+        <!-- Tab: Students Import -->
+        <div id="tab-data-students" class="tab-panel" style="display: none;">
+          <section class="data-section">
+            <h3>学生导入</h3>
+            <div class="form-group">
+              <label for="student-folder">从文件夹导入：</label>
+              <input type="file" id="student-folder" webkitdirectory directory multiple accept=".jpg,.jpeg,.png">
+              <button onclick="importStudentsFromFolder()">导入学生</button>
+              <p class="hint">用法：选择包含学生照片的文件夹。文件命名：学号-姓名.jpg/png，例如 20230001-张三.jpg</p>
+              <div class="hint-table" style="margin-top:8px;">
+                <div style="font-weight:600;margin:6px 0;">文件命名示例</div>
+                <table border="1" cellpadding="4" cellspacing="0">
+                  <tr><th>文件名</th><th>解析出的学号</th><th>解析出的姓名</th></tr>
+                  <tr><td>20230001-张三.jpg</td><td>20230001</td><td>张三</td></tr>
+                  <tr><td>20230002-李四.png</td><td>20230002</td><td>李四</td></tr>
+                </table>
+              </div>
+            </div>
 
-      <!-- Course-Students Mapping -->
-      <section class="data-section">
-        <h3 data-i18n="data_mappings_title">Course-Students Mapping</h3>
-        <div class="form-group">
-          <label for="mappings-excel" data-i18n="label_mappings_excel">Import from Excel (学号 + 课程编号):</label>
-          <input type="file" id="mappings-excel" accept=".xls,.xlsx">
-          <button onclick="importCourseStudentMappingsFromExcel()" data-i18n="btn_import_mappings">Import Mappings</button>
-          <p class="hint" data-i18n="hint_mapping_excel">Excel columns required: 学号/student_number, 课程编号/course_code. If a student_number or course_code does not exist, the result will include an error for that row — please add them first.</p>
-        </div>
-        <div class="form-group">
-          <label data-i18n="label_manual_create">Manual Create:</label>
-          <input type="text" id="map-student-number" placeholder="学号 (student number)">
-          <input type="text" id="map-course-code" placeholder="课程编号 (course code)">
-          <button onclick="submitNewMapping()" data-i18n="btn_add_mapping">Add Mapping</button>
-        </div>
-      </section>
+            <div class="form-group" style="margin-top:10px;">
+              <input type="text" id="students-filter" class="search-input" placeholder="按学号/姓名过滤...">
+              <button onclick="loadStudentsTable()">刷新列表</button>
+            </div>
+            <div id="students-table"></div>
 
-      <div id="data-results"></div>
+            <div class="form-group" style="margin-top:10px;">
+              <label>手工创建：</label>
+              <input type="text" id="student-number-input" placeholder="学号 (student number)">
+              <input type="text" id="student-name-input" placeholder="姓名 (name)">
+              <select id="student-gender-input">
+                <option value="">性别 (gender)</option>
+                <option value="male">男</option>
+                <option value="female">女</option>
+                <option value="other">其他</option>
+              </select>
+              <input type="file" id="student-photo-input" accept="image/*">
+              <button onclick="submitNewStudent()">创建学生</button>
+              <p class="hint">说明：支持按文件名格式从文件夹导入，无需 Excel。</p>
+            </div>
+          </section>
+        </div>
+
+        <!-- Tab: Courses Import -->
+        <div id="tab-data-courses" class="tab-panel" style="display: none;">
+          <section class="data-section">
+            <h3>课程导入</h3>
+            <div class="form-group">
+              <label for="courses-excel">从 Excel 导入（课程编号/课程名称/课程学时）：</label>
+              <input type="file" id="courses-excel" accept=".xls,.xlsx">
+              <button onclick="importCoursesFromExcel()">导入课程</button>
+              <p class="hint">Excel 必须包含：课程编号、课程名称、课程学时（或英文列名：course_code, course_name, course_hours）。</p>
+              <div class="hint-table" style="margin-top:8px;">
+                <div style="font-weight:600;margin:6px 0;">示例</div>
+                <table border="1" cellpadding="4" cellspacing="0">
+                  <tr><th>课程编号</th><th>课程名称</th><th>课程学时</th></tr>
+                  <tr><td>CS101</td><td>计算机导论</td><td>32</td></tr>
+                </table>
+              </div>
+            </div>
+
+            <div class="form-group" style="margin-top:10px;">
+              <input type="text" id="courses-filter" class="search-input" placeholder="按编号/名称过滤...">
+              <button onclick="loadCoursesTable()">刷新列表</button>
+            </div>
+            <div id="courses-table"></div>
+
+            <div class="form-group" style="margin-top:10px;">
+              <label>手工创建：</label>
+              <input type="text" id="course-code-input" placeholder="课程编号 (course code)">
+              <input type="text" id="course-name-input" placeholder="课程名称 (course name)">
+              <input type="number" id="course-hours-input" placeholder="课程学时 (course hours)">
+              <button onclick="submitNewCourse()">创建课程</button>
+            </div>
+          </section>
+        </div>
+
+        <!-- Tab: Preview / Results -->
+        <div id="tab-data-preview" class="tab-panel" style="display: none;">
+          <section class="data-section">
+            <h3>数据预览</h3>
+            <div class="form-group">
+              <button onclick="loadStudentsTable()">刷新学生</button>
+              <button onclick="loadCoursesTable()">刷新课程</button>
+            </div>
+            <div id="data-results"></div>
+          </section>
+        </div>
+      </div>
+
+      <script>
+        function switchDataTab(which) {
+          const ids = ['reg','students','courses','preview'];
+          ids.forEach(id => {
+            const el = document.getElementById('tab-data-' + id);
+            if (el) el.style.display = (id === which ? 'block' : 'none');
+          });
+          const btns = document.querySelectorAll('#data-tabs-card .tab-button');
+          btns.forEach((b, i) => {
+            b.classList.toggle('active', ids[i] === which);
+          });
+        }
+      </script>
     </div>
   </main>
 

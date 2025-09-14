@@ -56,12 +56,23 @@
     </div>
 
     <div class="debug-section">
-        <h2>快速导航</h2>
-        <a href="index.html" target="_blank">打开主系统</a> |
-        <a href="http://localhost:3001/api/faces" target="_blank">查看API</a> |
-        <a href="debug.html">刷新调试页面</a>
+      <h2>数据库清理</h2>
+      <div style="margin: 8px 0;">
+        <label for="admin-password">请输入清理口令：</label>
+        <input id="admin-password" type="password" placeholder="********" />
+        <button onclick="clearDatabase()">清空数据库数据</button>
+      </div>
+      <div class="hint">注意：清理将删除考勤、会话、学生、课程、映射等所有记录。口令固定为 88888888。</div>
+      <div id="clear-status"></div>
     </div>
-
+ 
+    <div class="debug-section">
+      <h2>快速导航</h2>
+      <a href="index.html" target="_blank">打开主系统</a> |
+      <a href="http://localhost:3001/api/faces" target="_blank">查看API</a> |
+      <a href="debug.html">刷新调试页面</a>
+    </div>
+ 
     <script>
         let debugLog = [];
 
@@ -268,11 +279,39 @@
             }
         }
 
+        async function clearDatabase() {
+            try {
+                const pwdInput = document.getElementById('admin-password');
+                const status = document.getElementById('clear-status');
+                const password = (pwdInput && pwdInput.value) || '';
+                if (!password) { status.innerHTML = '<div class="status-warn">⚠️ 请输入口令</div>'; return; }
+                if (!confirm('确认清空数据库中的所有业务数据？该操作不可撤销。')) return;
+
+                const resp = await fetch('/api/admin/clear', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password })
+                });
+                const data = await resp.json().catch(() => ({}));
+                if (resp.ok) {
+                    status.innerHTML = `<div class="status-good">✅ 清理完成（已清表: ${Array.isArray(data.tables) ? data.tables.join(', ') : 'N/A'}）</div>`;
+                    log('数据库清理完成');
+                } else {
+                    status.innerHTML = `<div class="status-bad">❌ 清理失败: ${data.error || resp.statusText}</div>`;
+                    log('数据库清理失败: ' + (data.error || resp.statusText), 'error');
+                }
+            } catch (e) {
+                const status = document.getElementById('clear-status');
+                status.innerHTML = `<div class="status-bad">❌ 清理异常: ${e.message}</div>`;
+                log('数据库清理异常: ' + e.message, 'error');
+            }
+        }
+
         // Auto check system status on load
         window.addEventListener('load', () => {
             log('调试页面已加载');
             setTimeout(checkSystemStatus, 1000);
         });
     </script>
-</body>
+  </body>
 </html>

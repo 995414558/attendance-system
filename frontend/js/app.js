@@ -6,9 +6,14 @@ let isModelsLoaded = false;
 let isAttendanceRunning = false;
 let currentSessionId = null;
 let currentSessionStartTime = null;
+let sessionSaved = false; // true only if at least one buffered record was uploaded
+let pendingSessionMeta = null; // { class_name, course_name, start_time }
 
 // Face tracking for sustained detection
 let faceTracking = new Map(); // faceId -> {count, firstSeen, lastSeen}
+
+ // Buffered attendance (student_number -> { label, hist, face_id, firstSeenAt })
+ let bufferedAttendances = new Map();
 
 // Class and course data
 let classCourseData = [];
@@ -27,8 +32,9 @@ async function init() {
         showMessage('系统初始化完成！', 'success');
     } catch (error) {
         console.error('Initialization error:', error);
-        // Hide loading overlay and show error
-        document.getElementById('loading-overlay').style.display = 'none';
+        // Hide loading overlay and show error (if overlay exists)
+        const ov = document.getElementById('loading-overlay');
+        if (ov) ov.style.display = 'none';
         showMessage('系统初始化失败，请刷新页面重试', 'error');
     }
 }
@@ -40,39 +46,49 @@ async function loadModels() {
     const progressBar = document.getElementById('loading-progress');
     const overlay = document.getElementById('loading-overlay');
 
-    try {
-        // Update loading text
-        overlay.querySelector('div').firstChild.textContent = '正在加载面部检测模型...';
-        progressBar.style.width = '25%';
+    const setOverlayText = (text) => {
+        if (!overlay) return;
+        const container = overlay.querySelector('div');
+        if (container) container.textContent = text;
+    };
+    const setProgress = (pct) => {
+        if (progressBar && typeof pct === 'number') {
+            progressBar.style.width = `${pct}%`;
+        }
+    };
 
+    try {
+        setOverlayText('正在加载面部检测模型...');
+        setProgress(20);
         await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
 
-        overlay.querySelector('div').firstChild.textContent = '正在加载面部特征点模型...';
-        progressBar.style.width = '50%';
-
+        setOverlayText('正在加载面部特征点模型...');
+        setProgress(40);
         await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
 
-        overlay.querySelector('div').firstChild.textContent = '正在加载面部识别模型...';
-        progressBar.style.width = '75%';
-
+        setOverlayText('正在加载面部识别模型...');
+        setProgress(60);
         await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
 
-        overlay.querySelector('div').firstChild.textContent = '模型加载完成！';
-        progressBar.style.width = '100%';
+        setOverlayText('正在加载年龄/性别模型...');
+        setProgress(80);
+        await faceapi.nets.ageGenderNet.loadFromUri(MODEL_URL);
 
+        setOverlayText('模型加载完成！');
+        setProgress(100);
         isModelsLoaded = true;
 
-        // Hide loading overlay after a short delay
-        setTimeout(() => {
-            overlay.style.display = 'none';
-        }, 1000);
+        // Hide loading overlay after a short delay (if present)
+        if (overlay) {
+            setTimeout(() => {
+                overlay.style.display = 'none';
+            }, 1000);
+        }
 
         console.log('All models loaded successfully from local server');
     } catch (error) {
         console.error('Error loading models:', error);
-        overlay.querySelector('div').firstChild.textContent = '模型加载失败';
-        overlay.querySelector('div').lastChild.textContent = '请检查后端服务器是否正常运行';
-
+        setOverlayText('模型加载失败');
         // Show error details for debugging
         showMessage(`模型加载错误: ${error.message}`, 'error');
     }
@@ -110,55 +126,113 @@ async function loadKnownFaces() {
 // Load class and course combinations
 async function loadClassCourseData() {
     try {
-        const response = await fetch('/api/attendance/classes-courses');
-        const data = await response.json();
-        classCourseData = data.combinations;
-
+        const [combosResp, studentsResp, coursesResp] = await Promise.all([
+            fetch('/api/attendance/classes-courses'),
+            fetch('/api/students'),
+            fetch('/api/courses')
+        ]);
+        const combosData = await combosResp.json().catch(() => ({ combinations: [] }));
+        const studentsData = await studentsResp.json().catch(() => ({ students: [] }));
+        const coursesData = await coursesResp.json().catch(() => ({ courses: [] }));
+ 
+        classCourseData = combosData.combinations || [];
+ 
+        const studentList = Array.isArray(studentsData) ? studentsData : (studentsData.students || []);
+        const courseList = Array.isArray(coursesData) ? coursesData : (coursesData.courses || []);
+ 
+        // Build quick index by name|class for resolving student_number during attendance
+        try {
+            window.__studentsIndexByNameClass = new Map();
+            (studentList || []).forEach(s => {
+                const key = `${(s.name || '').trim()}|${(s.class_name || '').trim()}`;
+                window.__studentsIndexByNameClass.set(key, s);
+            });
+        } catch (e) { console.warn('build students index failed', e); }
+ 
+        const classesFromCombos = classCourseData.map(item => item.class_name).filter(Boolean);
+        const classesFromStudents = studentList.map(s => s.class_name).filter(Boolean);
+        window.__allClasses = Array.from(new Set([...classesFromCombos, ...classesFromStudents])).sort();
+ 
+        const coursesFromCombos = classCourseData.map(item => item.course_name).filter(Boolean);
+        const coursesFromTable = courseList.map(c => c.course_name).filter(Boolean);
+        window.__allCourses = Array.from(new Set([...coursesFromCombos, ...coursesFromTable])).sort();
+ 
         // Populate class dropdown
         populateClassDropdown();
-
-        console.log(`Loaded ${classCourseData.length} class-course combinations`);
+ 
+        console.log(`Loaded combos=${classCourseData.length}, classes=${(window.__allClasses||[]).length}, courses=${(window.__allCourses||[]).length}`);
     } catch (error) {
         console.error('Error loading class-course data:', error);
     }
 }
 
-// Populate class dropdown
-function populateClassDropdown() {
-    const classSelect = document.getElementById('class-select');
-    const uniqueClasses = [...new Set(classCourseData.map(item => item.class_name))];
+ // Populate class options (combobox + fallback select)
+ function populateClassDropdown() {
+     const uniqueClasses = Array.isArray(window.__allClasses)
+         ? window.__allClasses
+         : [...new Set(classCourseData.map(item => item.class_name))];
 
-    classSelect.innerHTML = '<option value="">Select Class</option>';
-    uniqueClasses.forEach(className => {
-        const option = document.createElement('option');
-        option.value = className;
-        option.textContent = className;
-        classSelect.appendChild(option);
-    });
-}
+     // Datalist for unified combobox
+     const dl = document.getElementById('class-options');
+     if (dl) {
+         dl.innerHTML = '';
+         uniqueClasses.forEach(className => {
+             const opt = document.createElement('option');
+             opt.value = className;
+             dl.appendChild(opt);
+         });
+     }
 
-// Update course options based on selected class
-function updateCourseOptions() {
-    const classSelect = document.getElementById('class-select');
-    const courseSelect = document.getElementById('course-select');
-    const selectedClass = classSelect.value;
+     // Fallback select (if present)
+     const classSelect = document.getElementById('class-select');
+     if (classSelect) {
+         classSelect.innerHTML = '<option value="">Select Class</option>';
+         uniqueClasses.forEach(className => {
+             const option = document.createElement('option');
+             option.value = className;
+             option.textContent = className;
+             classSelect.appendChild(option);
+         });
+     }
 
-    courseSelect.innerHTML = '<option value="">Select Course</option>';
+     // Refresh course options
+     updateCourseOptions();
+ }
 
-    if (selectedClass) {
-        const coursesForClass = classCourseData
-            .filter(item => item.class_name === selectedClass)
-            .map(item => item.course_name);
+ // Update course options (combobox + fallback select)
+ function updateCourseOptions() {
+     const classSelect = document.getElementById('class-select');
+     const classInput = document.getElementById('class-combobox');
+     const selectedClass = classInput ? classInput.value.trim() : (classSelect ? classSelect.value : '');
 
-        const uniqueCourses = [...new Set(coursesForClass)];
-        uniqueCourses.forEach(courseName => {
-            const option = document.createElement('option');
-            option.value = courseName;
-            option.textContent = courseName;
-            courseSelect.appendChild(option);
-        });
-    }
-}
+     // All courses (mapping not enforced at this stage)
+     const allCourses = Array.isArray(window.__allCourses) && window.__allCourses.length
+         ? window.__allCourses
+         : [...new Set(classCourseData.map(item => item.course_name).filter(Boolean))];
+
+     // Datalist for unified combobox
+     const dl = document.getElementById('course-options');
+     if (dl) {
+         dl.innerHTML = '';
+         allCourses.forEach(courseName => {
+             const opt = document.createElement('option');
+             opt.value = courseName;
+             dl.appendChild(opt);
+         });
+     }
+
+     // Fallback select (if present)
+     const courseSelect = document.getElementById('course-select');
+     if (courseSelect) {
+         courseSelect.innerHTML = '<option value="">Select Course</option>';
+         allCourses.forEach(courseName => {
+             const option = document.createElement('option');
+             option.value = courseName;
+             option.textContent = courseName;
+             courseSelect.appendChild(option);
+         });
+     }
+ }
 
 // Page navigation
 function showPage(pageName) {
@@ -229,14 +303,23 @@ async function captureFace() {
         showMessage('模型尚未加载完成，请稍候', 'warning');
         return;
     }
+    // Defensive: ensure ageGender is available
+    if (!faceapi.nets.ageGenderNet.params) {
+        try { await faceapi.nets.ageGenderNet.loadFromUri('/weights/'); } catch (_) {}
+    }
 
     const video = document.getElementById('registration-video');
     const canvas = document.getElementById('registration-canvas');
 
     try {
-        const detection = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions())
+        const detection = await faceapi
+            .detectSingleFace(
+                video,
+                new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 })
+            )
             .withFaceLandmarks()
-            .withFaceDescriptor();
+            .withFaceDescriptor()
+            .withAgeAndGender();
 
         if (detection) {
             // Draw detection on canvas
@@ -261,8 +344,8 @@ async function captureFace() {
 
             showMessage('人脸捕获成功！正在注册...', 'success');
 
-            // Register the face
-            await registerFace(detection.descriptor);
+            // Register the face (pass gender)
+            await registerFace(detection.descriptor, detection.gender);
         } else {
             showMessage('未检测到人脸，请调整位置后重试', 'warning');
         }
@@ -276,6 +359,10 @@ async function captureFace() {
 async function registerFromImage() {
     const fileInput = document.getElementById('image-upload');
     const file = fileInput.files[0];
+    // Defensive: ensure ageGender is available
+    if (!faceapi.nets.ageGenderNet.params) {
+        try { await faceapi.nets.ageGenderNet.loadFromUri('/weights/'); } catch (_) {}
+    }
 
     if (!file) {
         showMessage('请选择一张图片', 'warning');
@@ -289,12 +376,14 @@ async function registerFromImage() {
 
     try {
         const image = await faceapi.bufferToImage(file);
-        const detection = await faceapi.detectSingleFace(image, new faceapi.TinyFaceDetectorOptions())
+        const detection = await faceapi
+            .detectSingleFace(image, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 }))
             .withFaceLandmarks()
-            .withFaceDescriptor();
+            .withFaceDescriptor()
+            .withAgeAndGender();
 
         if (detection) {
-            await registerFace(detection.descriptor);
+            await registerFace(detection.descriptor, detection.gender);
         } else {
             showMessage('图片中未检测到人脸，请选择其他图片', 'warning');
         }
@@ -305,38 +394,100 @@ async function registerFromImage() {
 }
 
 // Register face with server
-async function registerFace(descriptor) {
-    const className = document.getElementById('student-class').value.trim();
-    const name = document.getElementById('student-name').value.trim();
-    const course = document.getElementById('student-course').value.trim();
+async function registerFace(descriptor, detectedGender) {
+    const className = (document.getElementById('student-class')?.value || '').trim();
+    const studentNumber = (document.getElementById('student-number')?.value || '').trim();
+    const name = (document.getElementById('student-name')?.value || '').trim();
+    const course = ''; // registration no longer requires course
 
-    if (!className || !name || !course) {
+    if (!className || !name) {
         showMessage('请填写完整的学生信息', 'warning');
+        return;
+    }
+    if (!studentNumber) {
+        showMessage('请填写学号', 'warning');
         return;
     }
 
     try {
+        // 1) Save to faces (legacy pipeline)
         const response = await fetch('/api/faces', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                label: `${className}-${name}-${course}`,
+                label: `${className}-${name}`,
                 descriptors: Array.from(descriptor),
                 class: className,
                 name: name,
-                course: course
+                course: ''
             })
         });
 
+        // 2) Upsert into students with gender + class + descriptors
+        if (studentNumber) {
+            const gender = detectedGender || null;
+            try {
+                const createResp = await fetch('/api/students', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        student_number: studentNumber,
+                        name,
+                        gender,
+                        class_name: className,
+                        face_descriptors: Array.from(descriptor),
+                        photo_path: null
+                    })
+                });
+                if (!createResp.ok && createResp.status === 409) {
+                    // already exists -> update it
+                    const listResp = await fetch('/api/students');
+                    const listData = await listResp.json();
+                    const list = Array.isArray(listData) ? listData : (listData.students || []);
+                    const existing = list.find(s => String(s.student_number) === String(studentNumber));
+                    if (existing) {
+                        await fetch(`/api/students/${existing.id}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                name,
+                                gender,
+                                class_name: className,
+                                face_descriptors: Array.from(descriptor)
+                            })
+                        });
+                    }
+                }
+            } catch (e) {
+                console.warn('Upsert student failed:', e);
+            }
+        }
+
         if (response.ok) {
-            showMessage('学生注册成功！', 'success');
-            await loadKnownFaces(); // Reload faces
+            // Upload captured or selected photo to persist on server
+            try {
+                let photoBlob = null;
+                const fileInputEl = document.getElementById('image-upload');
+                const selectedFile = fileInputEl && fileInputEl.files && fileInputEl.files[0];
+                if (selectedFile) {
+                    photoBlob = selectedFile;
+                } else {
+                    const canvasEl = document.getElementById('registration-canvas');
+                    if (canvasEl && canvasEl.toBlob) {
+                        photoBlob = await new Promise(resolve => canvasEl.toBlob(resolve, 'image/jpeg', 0.92));
+                    }
+                }
+                if (photoBlob) {
+                    await uploadStudentPhoto(studentNumber, name, className, detectedGender, photoBlob);
+                }
+            } catch (e) { console.warn('Upload photo skipped:', e); }
+ 
+            const zhGender = displayGender(detectedGender);
+            showMessage(`学生注册成功！${zhGender ? '性别: ' + zhGender : ''}`, 'success');
+            await loadKnownFaces(); // Reload faces for matcher
             // Clear form
-            document.getElementById('student-class').value = '';
-            document.getElementById('student-name').value = '';
-            document.getElementById('student-course').value = '';
+            const fields = ['student-class','student-number','student-name'];
+            fields.forEach(id => { const el = document.getElementById(id); if (el) el.value=''; });
         } else {
             showMessage('注册失败，请重试', 'error');
         }
@@ -355,9 +506,11 @@ async function startAttendance() {
 
     const classSelect = document.getElementById('class-select');
     const courseSelect = document.getElementById('course-select');
-
-    const selectedClass = classSelect.value;
-    const selectedCourse = courseSelect.value;
+    const classInput = document.getElementById('class-combobox');
+    const courseInput = document.getElementById('course-combobox');
+ 
+    const selectedClass = classInput ? classInput.value.trim() : (classSelect ? classSelect.value : '');
+    const selectedCourse = courseInput ? courseInput.value.trim() : (courseSelect ? courseSelect.value : '');
 
     if (!selectedClass || !selectedCourse) {
         showMessage('请选择班级和课程', 'warning');
@@ -398,65 +551,16 @@ async function startAttendance() {
         testStream.getTracks().forEach(track => track.stop());
         console.log('[考勤启动] 摄像头权限检查通过');
 
-        // Create session in database
+        // Do NOT create session yet; defer creation until upload time
         const startTime = new Date().toISOString();
-        const response = await fetch('/api/attendance/sessions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                class_name: selectedClass,
-                course_name: selectedCourse,
-                start_time: startTime
-            })
-        });
-
-        if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(`Failed to create session: ${errorData.error || response.statusText}`);
-        }
-
-        const sessionData = await response.json();
-
-        // Check if there's a duplicate session
-        if (sessionData.duplicate) {
-          const userChoice = confirm(sessionData.message + '\n\n点击"确定"覆盖上一次记录，点击"取消"取消操作。');
-
-          if (userChoice) {
-            // Override the duplicate session
-            const overrideResponse = await fetch('/api/attendance/sessions/override', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                existing_session_id: sessionData.existing_session.id,
-                new_session_data: {
-                  class_name: selectedClass,
-                  course_name: selectedCourse,
-                  start_time: startTime
-                }
-              })
-            });
-
-            if (!overrideResponse.ok) {
-              throw new Error('Failed to override session');
-            }
-
-            const overrideData = await overrideResponse.json();
-            currentSessionId = overrideData.id;
-            showMessage(overrideData.message, 'warning');
-          } else {
-            // User cancelled, don't start attendance
-            return;
-          }
-        } else {
-          currentSessionId = sessionData.id;
-        }
-
+        pendingSessionMeta = {
+            class_name: selectedClass,
+            course_name: selectedCourse,
+            start_time: startTime
+        };
+        currentSessionId = null;
         currentSessionStartTime = startTime;
-        console.log(`[考勤启动] 会话创建成功: ${currentSessionId}`);
+        console.log(`[考勤启动] 已准备待保存会话: ${selectedClass} - ${selectedCourse} @ ${startTime}`);
 
         // Update UI
         const sessionDisplay = document.getElementById('current-session-display');
@@ -507,9 +611,8 @@ async function startAttendance() {
         // Update camera status to granted
         updateCameraStatus('granted');
 
-        // Clear previous canvas
-        const ctx = canvas.getContext('2d');
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // Hide old overlay canvas (we use HTML overlay instead)
+        if (canvas) { canvas.style.display = 'none'; }
 
         // Set attendance running flag
         isAttendanceRunning = true;
@@ -522,7 +625,9 @@ async function startAttendance() {
         statusText.textContent = '考勤系统运行中...';
         statusDiv.style.display = 'block';
 
-        // Start face detection loop
+        // Start face detection loop (switch buttons to "Upload" mode)
+        if (typeof switchToUploadButtons === 'function') switchToUploadButtons();
+        bufferedAttendances.clear();
         detectFacesForAttendance(currentSessionId);
 
         showMessage('考勤系统已启动，开始检测面部...', 'success');
@@ -635,22 +740,74 @@ async function detectFacesForAttendance(sessionId) {
             }
         }
 
-        // Draw detections
-        const displaySize = { width: video.videoWidth, height: video.videoHeight };
-        faceapi.matchDimensions(canvas, displaySize);
-
-        const resizedDetections = faceapi.resizeResults(detections, displaySize);
-        const ctx = canvas.getContext('2d');
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        // Draw video frame first
-        ctx.drawImage(video, 0, 0, displaySize.width, displaySize.height);
-
-        // Draw detection boxes
-        faceapi.draw.drawDetections(canvas, resizedDetections);
-
-        // Make sure canvas is visible
-        canvas.style.display = 'block';
+        // Render HTML overlay boxes on top of video (no canvas)
+        try {
+            // Ensure overlay element exists
+            let overlay = document.getElementById('attendance-overlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'attendance-overlay';
+                overlay.style.position = 'absolute';
+                overlay.style.pointerEvents = 'none';
+                overlay.style.zIndex = '999';
+                document.body.appendChild(overlay);
+            }
+            // Position overlay to align with video element
+            const rect = video.getBoundingClientRect();
+            overlay.style.left = `${Math.round(rect.left + window.scrollX)}px`;
+            overlay.style.top = `${Math.round(rect.top + window.scrollY)}px`;
+            overlay.style.width = `${Math.round(rect.width)}px`;
+            overlay.style.height = `${Math.round(rect.height)}px`;
+ 
+            // Build overlay items with labels
+            const scaleX = rect.width / video.videoWidth;
+            const scaleY = rect.height / video.videoHeight;
+            overlay.innerHTML = '';
+ 
+            for (const det of detections) {
+                // derive label (best-match or Unknown)
+                let label = 'Unknown';
+                if (faceMatcher) {
+                    const m = faceMatcher.findBestMatch(det.descriptor);
+                    if (m && m.label && m.distance < 0.7) {
+                        label = m.label;
+                    }
+                }
+                const box = det.detection.box;
+                const left = Math.max(0, Math.round(box.x * scaleX));
+                const top = Math.max(0, Math.round(box.y * scaleY));
+                const width = Math.round(box.width * scaleX);
+                const height = Math.round(box.height * scaleY);
+ 
+                const boxEl = document.createElement('div');
+                boxEl.style.cssText = `
+                    position:absolute;
+                    left:${left}px; top:${top}px;
+                    width:${width}px; height:${height}px;
+                    border:2px solid #00e676;
+                    border-radius:4px;
+                    box-shadow: 0 0 8px rgba(0,0,0,0.35);
+                `;
+                const lbl = document.createElement('div');
+                const pretty = (function(){ try { const m = label && label.match(/^(.+?)\s*-\s*(.+?)\s*\((.*?)\)$/); return m ? `${m[1]} - ${m[2]}` : label; } catch(_) { return label; } })();
+                lbl.textContent = pretty;
+                lbl.style.cssText = `
+                    position:absolute;
+                    left:0; top:-22px;
+                    background:rgba(0,0,0,0.65);
+                    color:#fff;
+                    padding:2px 6px;
+                    font-size:12px;
+                    border-radius:3px;
+                    max-width:${Math.max(60, width)}px;
+                    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+                `;
+                boxEl.appendChild(lbl);
+                overlay.appendChild(boxEl);
+            }
+        } catch (e) {
+            console.warn('overlay render failed', e);
+        }
 
     } catch (error) {
         console.error('Error in face detection:', error);
@@ -720,85 +877,202 @@ async function recordAttendance(faceLabel, sessionId, attendanceKey) {
         const face = knownFaces.find(f => f.label === faceLabel);
         if (!face) return;
 
-        // Parse face label to get class and course
-        // Format: "班级 - 姓名 (课程)"
-        const labelMatch = faceLabel.match(/^(.+?)\s*-\s*(.+?)\s*\((.+?)\)$/);
-        if (!labelMatch) {
-            console.error(`Invalid face label format: ${faceLabel}`);
+        // If already buffered/recorded for this session, skip
+        if (recordedAttendances.has(attendanceKey)) {
             return;
         }
 
-        const studentClass = labelMatch[1].trim();
-        const studentName = labelMatch[2].trim();
-        const studentCourse = labelMatch[3].trim();
-
-        // Get current session details to validate
-        const sessionResponse = await fetch(`/api/attendance/sessions`);
-        const sessionData = await sessionResponse.json();
-
-        const currentSession = sessionData.sessions.find(s => s.id === sessionId);
-        if (!currentSession) {
-            console.error(`Session not found: ${sessionId}`);
-            return;
-        }
-
-        // Validate that student belongs to this session's class and course
-        if (studentClass !== currentSession.class_name || studentCourse !== currentSession.course_name) {
-            console.log(`[考勤验证失败] 学生 ${studentName} 不属于当前会话的班级(${currentSession.class_name})和课程(${currentSession.course_name})`);
-            console.log(`[学生信息] 班级: ${studentClass}, 课程: ${studentCourse}`);
-
-            // Add to log as invalid attendance
-            const log = document.getElementById('attendance-log');
-            const item = document.createElement('div');
-            item.className = 'attendance-item invalid';
-            item.textContent = `${new Date().toLocaleTimeString()} - ${faceLabel} ❌ (不属于当前班级/课程)`;
-            log.appendChild(item);
-
-            // Keep only last 10 entries
-            while (log.children.length > 10) {
-                log.removeChild(log.firstChild);
+        // Resolve student_number from label => window.__studentsIndexByNameClass
+        let studentNumber = null;
+        try {
+            const m = faceLabel && faceLabel.match(/^(.+?)\s*-\s*(.+?)\s*\((.+?)\)$/);
+            if (m) {
+                const cls = (m[1] || '').trim();
+                const nm = (m[2] || '').trim();
+                const key = `${nm}|${cls}`;
+                const sidx = (typeof window !== 'undefined') ? window.__studentsIndexByNameClass : null;
+                const s = sidx && sidx.get ? sidx.get(key) : null;
+                if (s && s.student_number) studentNumber = String(s.student_number);
             }
-
-            return;
+        } catch (e) {
+            console.warn('resolve student_number failed', e);
         }
 
-        // Student validation passed, record attendance
-        const response = await fetch('/api/attendance', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                face_id: face.id,
-                session_id: sessionId
-            })
-        });
+        // Fetch historical count for this face (best-effort)
+        let hist = 0;
+        try {
+            const cntResp = await fetch(`/api/attendance/count/${face.id}`);
+            if (cntResp.ok) {
+                const cntJson = await cntResp.json();
+                hist = Number(cntJson.count || 0);
+            }
+        } catch (e) {
+            console.warn('fetch count failed', e);
+        }
 
-        if (response.ok) {
-            // Mark as recorded
+        // If already buffered for this student in the same session, skip
+        const bufKey = studentNumber ? studentNumber : `face:${face.id}`;
+        if (bufferedAttendances.has(bufKey)) {
+            console.log(`[缓冲去重] 本会话已存在 ${faceLabel} (${studentNumber || ('face:'+face.id)}), 跳过`);
             recordedAttendances.add(attendanceKey);
-
-            // Add to attendance log
-            const log = document.getElementById('attendance-log');
-            const item = document.createElement('div');
-            item.className = 'attendance-item';
-            item.textContent = `${new Date().toLocaleTimeString()} - ${faceLabel} ✅ (持续检测)`;
-            log.appendChild(item);
-
-            // Keep only last 10 entries
-            while (log.children.length > 10) {
-                log.removeChild(log.firstChild);
-            }
-
-            console.log(`[考勤记录成功] ${faceLabel} 在会话 ${sessionId} 中记录 (持续检测)`);
-
-            // Remove from tracking since attendance is recorded
-            faceTracking.delete(face.id);
-        } else {
-            console.error(`[考勤记录失败] HTTP ${response.status}: ${response.statusText}`);
+            return;
         }
+
+        // Buffer only (do not persist immediately)
+        bufferedAttendances.set(bufKey, { label: faceLabel, hist, firstSeenAt: Date.now(), face_id: face.id, student_number: studentNumber });
+
+        // Throttle duplicates in this session
+        recordedAttendances.add(attendanceKey);
+
+        // Add to attendance log (pending upload)
+        const log = document.getElementById('attendance-log');
+        const item = document.createElement('div');
+        item.className = 'attendance-item pending';
+        const prettyLabel = (function(){ try { const m = faceLabel && faceLabel.match(/^(.+?)\s*-\s*(.+?)\s*\((.*?)\)$/); return m ? `${m[1]} - ${m[2]}` : faceLabel; } catch(_) { return faceLabel; } })();
+        item.textContent = `${formatTimeCNTime(new Date())} - ${prettyLabel} 已识别，待上传（历史${hist}次）`;
+        log.appendChild(item);
+
+        // Keep only last 10 entries
+        while (log.children.length > 10) {
+            log.removeChild(log.firstChild);
+        }
+
+        console.log(`[缓冲考勤] ${faceLabel} 已加入缓冲（历史${hist}次），等待上传`);
+
+        // Remove from tracking since attendance is buffered
+        faceTracking.delete(face.id);
     } catch (error) {
-        console.error('Error recording attendance:', error);
+        console.error('Error buffering attendance:', error);
+    }
+}
+
+async function uploadBufferedAttendance() {
+    try {
+        if (!bufferedAttendances || bufferedAttendances.size === 0) {
+            showMessage('没有待上传的记录', 'info');
+            return;
+        }
+        // Create session on-demand if not created yet
+        if (!currentSessionId) {
+            const clsSel = document.getElementById('class-combobox') || document.getElementById('class-select');
+            const crsSel = document.getElementById('course-combobox') || document.getElementById('course-select');
+            const selectedClass = (pendingSessionMeta && pendingSessionMeta.class_name) || (clsSel ? (clsSel.value || clsSel.textContent || '').trim() : '');
+            const selectedCourse = (pendingSessionMeta && pendingSessionMeta.course_name) || (crsSel ? (crsSel.value || crsSel.textContent || '').trim() : '');
+            const startTime = (pendingSessionMeta && pendingSessionMeta.start_time) || new Date().toISOString();
+
+            const respSession = await fetch('/api/attendance/sessions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ class_name: selectedClass, course_name: selectedCourse, start_time: startTime })
+            });
+            if (!respSession.ok) {
+                const errorData = await respSession.json().catch(() => ({}));
+                throw new Error(`Failed to create session: ${errorData.error || respSession.statusText}`);
+            }
+            const sessionData = await respSession.json();
+
+            currentSessionId = sessionData.id;
+            currentSessionStartTime = startTime;
+        }
+
+        let uploaded = 0;
+        const log = document.getElementById('attendance-log');
+        for (const [key, item] of bufferedAttendances.entries()) {
+            try {
+                const payload = { session_id: currentSessionId };
+                // Prefer student_number; fallback to face_id
+                if (item && item.student_number) {
+                    payload.student_number = String(item.student_number);
+                } else if (String(key).startsWith('face:')) {
+                    payload.face_id = Number(String(key).slice(5));
+                } else if (/^\d/.test(String(key))) {
+                    payload.student_number = String(key);
+                }
+                if (item && item.face_id != null && payload.face_id == null) {
+                    payload.face_id = item.face_id;
+                }
+
+                const resp = await fetch('/api/attendance', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (resp.ok) {
+                    uploaded++;
+                    const entry = document.createElement('div');
+                    entry.className = 'attendance-item uploaded';
+                    const prettyLabel2 = (function(){ try { const m = item.label && item.label.match(/^(.+?)\s*-\s*(.+?)\s*\((.*?)\)$/); return m ? `${m[1]} - ${m[2]}` : item.label; } catch(_) { return item.label; } })();
+                    entry.textContent = `${formatTimeCNTime(new Date())} - ${prettyLabel2} ✅（历史${item.hist}次）`;
+                    log.appendChild(entry);
+                    while (log.children.length > 10) {
+                        log.removeChild(log.firstChild);
+                    }
+                } else {
+                    const text = await resp.text().catch(() => '');
+                    console.warn('Upload attendance failed:', resp.status, text);
+                }
+            } catch (e) {
+                console.warn('Upload one failed:', e);
+            }
+        }
+
+        bufferedAttendances.clear();
+        sessionSaved = uploaded > 0;
+        if (uploaded > 0) {
+            showMessage(`已上传 ${uploaded} 条考勤记录`, 'success');
+            // Auto-refresh Reports tab for this session (SPA has the element even if hidden)
+            try {
+                await loadSessionsForReport();
+                const sel = document.getElementById('report-session');
+                if (sel) {
+                    sel.value = currentSessionId;
+                    await loadReport();
+                }
+            } catch (e) {
+                console.warn('auto refresh report failed', e);
+            }
+        } else {
+            showMessage('未上传任何记录', 'warning');
+        }
+    } catch (e) {
+        console.error('uploadBufferedAttendance error:', e);
+        showMessage('上传失败，请稍后重试', 'error');
+    }
+}
+
+function getAttendanceButtons() {
+    const container = document.getElementById('attendance-page') || document;
+    const startBtn = container.querySelector('[data-i18n="attendance_start_btn"]');
+    const stopBtn = container.querySelector('[data-i18n="attendance_stop_btn"]');
+    return { startBtn, stopBtn };
+}
+
+function switchToUploadButtons() {
+    const { startBtn } = getAttendanceButtons();
+    if (startBtn) {
+        const txt = (typeof currentLanguage !== 'undefined' && currentLanguage === 'en')
+            ? 'Upload Attendance Records'
+            : '上传考勤记录';
+        startBtn.textContent = txt;
+        startBtn.onclick = () => uploadBufferedAttendance();
+    }
+}
+
+function restoreAttendanceButtons() {
+    const { startBtn, stopBtn } = getAttendanceButtons();
+    if (startBtn) {
+        const txt = (typeof currentLanguage !== 'undefined' && currentLanguage === 'en')
+            ? 'Start Attendance Session'
+            : '开始考勤会话';
+        startBtn.textContent = txt;
+        startBtn.onclick = () => startAttendance();
+    }
+    if (stopBtn) {
+        const txt = (typeof currentLanguage !== 'undefined' && currentLanguage === 'en')
+            ? 'Stop Attendance'
+            : '停止考勤';
+        stopBtn.textContent = txt;
+        stopBtn.onclick = () => stopAttendance();
     }
 }
 
@@ -858,8 +1132,22 @@ async function processBatch() {
                                 if (studentClass === currentSession.class_name && studentCourse === currentSession.course_name) {
                                     const attendanceKey = `${face.id}-${sessionId}`;
                                     if (!recordedAttendances.has(attendanceKey)) {
-                                        await recordAttendance(match.label, sessionId, attendanceKey);
-                                        recognized++;
+                                        try {
+                                            const resp = await fetch('/api/attendance', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ face_id: face.id, session_id: sessionId })
+                                            });
+                                            if (resp.ok) {
+                                                recordedAttendances.add(attendanceKey);
+                                                recognized++;
+                                            } else {
+                                                const text = await resp.text().catch(() => '');
+                                                console.warn('Batch attendance insert failed:', resp.status, text);
+                                            }
+                                        } catch (e) {
+                                            console.warn('Batch insert error:', e);
+                                        }
                                     }
                                 } else {
                                     console.log(`[批量处理] 学生 ${match.label} 不属于当前会话的班级和课程`);
@@ -887,12 +1175,16 @@ async function loadSessionsForReport() {
         const data = await response.json();
 
         const sessionSelect = document.getElementById('report-session');
+        if (!sessionSelect) return;
         sessionSelect.innerHTML = '<option value="">Select Session</option>';
-
-        data.sessions.forEach(session => {
+ 
+        (data.sessions || []).forEach(session => {
             const option = document.createElement('option');
             option.value = session.id;
-            option.textContent = session.full_session_id;
+            // 东八区显示
+            const startStr = (typeof formatTimeCN === 'function') ? formatTimeCN(session.start_time) : (new Date(session.start_time)).toLocaleString('zh-CN');
+            const endStr = session.end_time ? ((typeof formatTimeCN === 'function') ? formatTimeCN(session.end_time) : (new Date(session.end_time)).toLocaleString('zh-CN')) : '进行中';
+            option.textContent = `${session.class_name}-${session.course_name}(${startStr} - ${endStr})`;
             sessionSelect.appendChild(option);
         });
     } catch (error) {
@@ -900,55 +1192,87 @@ async function loadSessionsForReport() {
     }
 }
 
-// Reports
-async function loadReport() {
-    const sessionId = document.getElementById('report-session').value.trim();
-    if (!sessionId) {
-        showMessage('请选择会话', 'warning');
-        return;
-    }
-
-    try {
-        const response = await fetch(`/api/attendance/summary/${sessionId}`);
-        const data = await response.json();
-
-        const results = document.getElementById('report-results');
-        results.innerHTML = '<h3>考勤统计</h3>';
-
-        if (data.summary.length === 0) {
-            results.innerHTML += '<p>该会话暂无考勤记录</p>';
-            return;
-        }
-
-        const table = document.createElement('table');
-        table.innerHTML = `
-            <tr>
-                <th>学生</th>
-                <th>班级</th>
-                <th>课程</th>
-                <th>考勤次数</th>
-                <th>操作</th>
-            </tr>
-        `;
-
-        data.summary.forEach(item => {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td>${item.name}</td>
-                <td>${item.class}</td>
-                <td>${item.course}</td>
-                <td>${item.count}</td>
-                <td><button onclick="showStudentDetails('${item.name}', '${item.class}', '${item.course}', '${sessionId}')">查看详情</button></td>
-            `;
-            table.appendChild(row);
-        });
-
-        results.appendChild(table);
-    } catch (error) {
-        console.error('Error loading report:', error);
-        showMessage('加载报告失败', 'error');
-    }
-}
+ // Reports
+ async function loadReport() {
+     const sessionId = document.getElementById('report-session').value.trim();
+     if (!sessionId) {
+         showMessage('请选择会话', 'warning');
+         return;
+     }
+ 
+     try {
+         const [summaryResp, attendeesResp] = await Promise.all([
+             fetch(`/api/attendance/summary/${encodeURIComponent(sessionId)}`),
+             fetch(`/api/attendance/session/${encodeURIComponent(sessionId)}`)
+         ]);
+         const summaryData = await summaryResp.json();
+         const attendeesData = await attendeesResp.json().catch(() => ({ attendees: [] }));
+ 
+         const results = document.getElementById('report-results');
+         results.innerHTML = '';
+ 
+         // Attendees list (single per student per session)
+         const attendees = Array.isArray(attendeesData.attendees) ? attendeesData.attendees : [];
+         const attendeesSection = document.createElement('div');
+         attendeesSection.innerHTML = '<h3>本次会话出勤名单</h3>';
+         if (attendees.length === 0) {
+             attendeesSection.innerHTML += '<p>暂无出勤记录</p>';
+         } else {
+             const atbl = document.createElement('table');
+             atbl.className = 'stats-table';
+             atbl.innerHTML = `
+                 <tr>
+                     <th>学号</th>
+                     <th>姓名</th>
+                     <th>班级</th>
+                     <th>课程</th>
+                 </tr>
+             `;
+             attendees.forEach(a => {
+                 const r = document.createElement('tr');
+                 r.innerHTML = `<td>${a.student_number || ''}</td><td>${a.name || ''}</td><td>${a.class_name || ''}</td><td>${a.course_name || ''}</td>`;
+                 atbl.appendChild(r);
+             });
+             attendeesSection.appendChild(atbl);
+         }
+         results.appendChild(attendeesSection);
+ 
+         // Legacy summary (counts by face)
+         const summary = Array.isArray(summaryData.summary) ? summaryData.summary : [];
+         const sumSection = document.createElement('div');
+         sumSection.innerHTML = '<h3>考勤统计</h3>';
+         if (summary.length === 0) {
+             sumSection.innerHTML += '<p>该会话暂无考勤记录</p>';
+         } else {
+             const table = document.createElement('table');
+             table.innerHTML = `
+                 <tr>
+                     <th>学生</th>
+                     <th>班级</th>
+                     <th>课程</th>
+                     <th>考勤次数</th>
+                     <th>操作</th>
+                 </tr>
+             `;
+             summary.forEach(item => {
+                 const row = document.createElement('tr');
+                 row.innerHTML = `
+                     <td>${item.name}</td>
+                     <td>${item.class}</td>
+                     <td>${item.course}</td>
+                     <td>${item.count}</td>
+                     <td><button onclick="showStudentDetails('${item.name}', '${item.class}', '${item.course}', '${sessionId}')">查看详情</button></td>
+                 `;
+                 table.appendChild(row);
+             });
+             sumSection.appendChild(table);
+         }
+         results.appendChild(sumSection);
+     } catch (error) {
+         console.error('Error loading report:', error);
+         showMessage('加载报告失败', 'error');
+     }
+ }
 
 // Show student details with drill-down
 async function showStudentDetails(studentName, className, courseName, sessionId) {
@@ -981,7 +1305,10 @@ async function showStudentDetails(studentName, className, courseName, sessionId)
             const list = document.createElement('ul');
             data.attendance.forEach(record => {
                 const item = document.createElement('li');
-                item.textContent = new Date(record.timestamp).toLocaleString();
+                // 东八区显示
+                item.textContent = (typeof formatTimeCN === 'function')
+                  ? formatTimeCN(record.timestamp)
+                  : new Date(record.timestamp).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
                 list.appendChild(item);
             });
             detailsDiv.appendChild(list);
@@ -1084,8 +1411,9 @@ async function showClassDetails(className) {
             table.innerHTML = `
                 <tr>
                     <th>学生姓名</th>
-                    <th>课程</th>
-                    <th>考勤次数</th>
+                    <th>班级</th>
+                    <th>打卡次数</th>
+                    <th>总会话</th>
                     <th>出勤率</th>
                 </tr>
             `;
@@ -1097,7 +1425,7 @@ async function showClassDetails(className) {
 
                 row.innerHTML = `
                     <td>${detail.name}</td>
-                    <td>${detail.course}</td>
+                    <td>${detail.course || (typeof t === 'function' ? t('stats_all_courses') : '全部课程')}</td>
                     <td>${detail.attendance_count}</td>
                     <td class="${rateClass}">${detail.attendance_rate}%</td>
                 `;
@@ -1123,6 +1451,25 @@ function getFaceIdByName(name) {
 }
 
 // Utility functions
+// === CN timezone helpers (global) ===
+function formatTimeCN(value) {
+    try {
+        const d = value instanceof Date ? value : new Date(value);
+        return d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+    } catch (e) {
+        const d = value instanceof Date ? value : new Date(value);
+        return d.toLocaleString('zh-CN');
+    }
+}
+function formatTimeCNTime(value) {
+    try {
+        const d = value instanceof Date ? value : new Date(value);
+        return d.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+    } catch (e) {
+        const d = value instanceof Date ? value : new Date(value);
+        return d.toLocaleTimeString('zh-CN');
+    }
+}
 function showMessage(message, type = 'info') {
     // Remove existing message
     const existingMessage = document.getElementById('system-message');
@@ -1183,22 +1530,28 @@ async function stopAttendance() {
         return;
     }
 
-    try {
-        // Update session with end time
-        const endTime = new Date().toISOString();
-        const response = await fetch(`/api/attendance/sessions/${currentSessionId}/end`, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                end_time: endTime
-            })
-        });
+    const hadBuffered = bufferedAttendances && bufferedAttendances.size > 0;
 
-        if (response.ok) {
-            const data = await response.json();
-            console.log(`Session ended: ${data.final_session_id}`);
+    try {
+        // Update session with end time only if a session was actually saved (uploaded)
+        if (currentSessionId && sessionSaved) {
+            const endTime = new Date().toISOString();
+            const response = await fetch(`/api/attendance/sessions/${currentSessionId}/end`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ end_time: endTime })
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                const endStr = (data && data.end_time) ? ((typeof formatTimeCN === 'function') ? formatTimeCN(data.end_time) : data.end_time) : '';
+                const msg = data && data.final_session_id
+                    ? `Session ended: ${data.final_session_id}`
+                    : `Session ended: ${data.id}${endStr ? ' at ' + endStr : ''}`;
+                console.log(msg);
+            }
+        } else {
+            console.log('[停止考勤] 本次未上传记录，不保存会话');
         }
 
     } catch (error) {
@@ -1207,17 +1560,26 @@ async function stopAttendance() {
 
     stopWebcam();
 
-    // Clear canvas
+    // Remove HTML overlay if present
+    const ov = document.getElementById('attendance-overlay');
+    if (ov && ov.parentNode) ov.parentNode.removeChild(ov);
+
+    // Clear legacy canvas if exists
     const canvas = document.getElementById('attendance-canvas');
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
 
     // Reset attendance state
     isAttendanceRunning = false;
     currentSessionId = null;
     currentSessionStartTime = null;
+    pendingSessionMeta = null;
+    sessionSaved = false;
 
-    // Clear recorded attendances for new session
+    // Clear buffered and recorded attendances for new session
+    if (bufferedAttendances) bufferedAttendances.clear();
     recordedAttendances.clear();
 
     // Clear face tracking data
@@ -1225,11 +1587,28 @@ async function stopAttendance() {
 
     // Hide status indicator
     const statusDiv = document.getElementById('attendance-status');
-    statusDiv.style.display = 'none';
+    if (statusDiv) statusDiv.style.display = 'none';
 
     // Hide session info
     const sessionInfo = document.getElementById('current-session-info');
-    sessionInfo.style.display = 'none';
+    if (sessionInfo) sessionInfo.style.display = 'none';
+
+    // Restore buttons
+    if (typeof restoreAttendanceButtons === 'function') restoreAttendanceButtons();
+
+    // Log discard info if there was pending buffer
+    if (hadBuffered) {
+        const log = document.getElementById('attendance-log');
+        if (log) {
+            const item = document.createElement('div');
+            item.className = 'attendance-item invalid';
+            item.textContent = `${formatTimeCNTime(new Date())} - 本次缓冲的考勤记录已丢弃`;
+            log.appendChild(item);
+            while (log.children.length > 10) {
+                log.removeChild(log.firstChild);
+            }
+        }
+    }
 
     showMessage('考勤会话已停止', 'info');
     console.log('Attendance session stopped - cleared all tracking data');
@@ -1410,13 +1789,29 @@ function updateCameraStatus(status) {
     }
 }
 
-// Initialize when page loads
+/** Initialize when page loads */
 document.addEventListener('DOMContentLoaded', async function() {
     const hasData = document.getElementById('data-page');
     const hasAttendance = document.getElementById('attendance-page');
     const hasReports = document.getElementById('reports-page');
     const hasStats = document.getElementById('statistics-page');
     const hasBatch = document.getElementById('batch-page');
+
+    // Default to Data & Register when opening index.html (SPA)
+    try {
+        const valid = ['data','attendance','batch','reports','statistics'];
+        const fromHash = (location.hash || '').replace('#','').trim();
+        if (hasData) {
+            if (fromHash && valid.includes(fromHash)) {
+                showPage(fromHash);
+            } else {
+                showPage('data');
+            }
+        }
+    } catch (e) {
+        console.warn('Default showPage failed, fallback to unhide data-page', e);
+        if (hasData) hasData.style.display = 'block';
+    }
 
     if (hasAttendance || hasData) {
         await checkCameraPermission();
@@ -1425,6 +1820,10 @@ document.addEventListener('DOMContentLoaded', async function() {
     if (hasData) {
         // Data & Register needs models for face registration
         init();
+        // Preload lists for a non-empty view
+        if (typeof loadStudentsTable === 'function') loadStudentsTable();
+        if (typeof loadCoursesTable === 'function') loadCoursesTable();
+        if (typeof loadMappingsTable === 'function') loadMappingsTable();
     } else if (hasAttendance) {
         // Attendance requires models + known faces
         init();
@@ -1435,9 +1834,25 @@ document.addEventListener('DOMContentLoaded', async function() {
         loadCourseStats();
         loadClassStats();
         loadStudentStats();
+        hideLegacyStatisticsBlocks();
     } else if (hasBatch) {
-        // Batch page: no special init required
+        // Batch page also needs models and known faces for recognition
+        init();
     }
+
+    // Hook fuzzy filters if present (attendance selects)
+    try {
+        const classFilter = document.getElementById('class-filter');
+        if (classFilter && !classFilter.__hooked) {
+            classFilter.__hooked = true;
+            classFilter.addEventListener('input', () => populateClassDropdown());
+        }
+        const courseFilter = document.getElementById('course-filter');
+        if (courseFilter && !courseFilter.__hooked) {
+            courseFilter.__hooked = true;
+            courseFilter.addEventListener('input', () => updateCourseOptions());
+        }
+    } catch (e) { console.warn('bind filter events failed', e); }
 });
 
 // Cleanup on page unload
@@ -1449,6 +1864,32 @@ window.addEventListener('beforeunload', stopWebcam);
 function setDataResults(html) {
     const div = document.getElementById('data-results');
     if (div) div.innerHTML = html;
+}
+// Map API gender to zh display
+function displayGender(g) {
+    if (!g) return '';
+    const v = String(g).toLowerCase();
+    if (v === 'male') return '男';
+    if (v === 'female') return '女';
+    return v;
+}
+// Upload student photo blob to backend and upsert photo_path (and optional fields)
+async function uploadStudentPhoto(studentNumber, name, className, gender, blob) {
+    try {
+        const form = new FormData();
+        form.append('photo', blob, `${studentNumber || name || 'student'}.jpg`);
+        form.append('student_number', studentNumber);
+        if (name) form.append('name', name);
+        if (className) form.append('class_name', className);
+        if (gender) form.append('gender', gender);
+        const resp = await fetch('/api/students/upload/photo', { method: 'POST', body: form });
+        if (!resp.ok) {
+            const txt = await resp.text().catch(() => '');
+            console.warn('upload_photo failed:', resp.status, txt);
+        }
+    } catch (e) {
+        console.warn('uploadStudentPhoto error:', e);
+    }
 }
 function jsonPre(obj) {
     const escaped = JSON.stringify(obj, null, 2)
@@ -1475,14 +1916,74 @@ async function importStudentsFromFolder() {
             return;
         }
 
+        // Try get default class from folder name
+        let defaultClass = '';
+        const first = images[0];
+        if (first && first.webkitRelativePath) {
+            const segs = first.webkitRelativePath.split('/').filter(Boolean);
+            if (segs.length) defaultClass = segs[0];
+        }
+        const className = prompt('请输入班级（默认使用文件夹名称）', defaultClass) || defaultClass || '';
+
         setDataResults('<p>正在导入学生，请稍候...</p>');
 
         const form = new FormData();
+        // Prepare meta map for gender/class per file
+        const meta = {};
+        // Accumulate faces to create (client-side descriptor -> POST /api/faces)
+        const facesToCreate = [];
+        // Helper: parse "学号-姓名" or "学号_姓名"
+        function parseStudentFromFilenameFrontend(filename) {
+            const nameWithoutExt = String(filename || '').replace(/\.[^.]+$/,'');
+            let parts = nameWithoutExt.split('-');
+            if (parts.length < 2) parts = nameWithoutExt.split('_');
+            if (parts.length < 2) return null;
+            const student_number = (parts[0] || '').trim();
+            const name = (parts.slice(1).join('-') || '').trim();
+            if (!student_number || !name) return null;
+            return { student_number, name };
+        }
+
+        // Ensure age/gender model loaded
+        if (!faceapi.nets.ageGenderNet.params) {
+            await faceapi.nets.ageGenderNet.loadFromUri('/weights/');
+        }
+
+        // Detector options tuned for photos
+        const detOptions = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 });
+
         for (const file of images) {
             form.append('photos', file, file.name);
+            try {
+                // Detect gender per image (best-effort)
+                const img = await faceapi.bufferToImage(file);
+                const det = await faceapi
+                    .detectSingleFace(img, detOptions)
+                    .withFaceLandmarks()
+                    .withFaceDescriptor()
+                    .withAgeAndGender();
+                const gender = det && det.gender ? det.gender : null;
+                meta[file.name] = { gender, class_name: className || null };
+                // Prepare a faces payload if we have a descriptor and can parse name
+                try {
+                    const parsed = parseStudentFromFilenameFrontend(file.name);
+                    if (det && det.descriptor && parsed && parsed.name) {
+                        facesToCreate.push({
+                            label: `${className}-${parsed.name}-`,
+                            descriptors: Array.from(det.descriptor),
+                            class: className || '',
+                            name: parsed.name,
+                            course: ''
+                        });
+                    }
+                } catch (_) {}
+            } catch (err) {
+                console.warn('Gender detect failed for', file.name, err?.message || err);
+                meta[file.name] = { gender: null, class_name: className || null };
+            }
         }
-        // Optional default gender from UI (if needed extend later)
-        // form.append('gender', '');
+        form.append('class_name', className || '');
+        form.append('meta', JSON.stringify(meta));
 
         const resp = await fetch('/api/students/import/photos', {
             method: 'POST',
@@ -1493,6 +1994,21 @@ async function importStudentsFromFolder() {
             throw new Error(err || `HTTP ${resp.status}`);
         }
         const data = await resp.json();
+        // After student rows are inserted/updated, create faces to enable recognition immediately
+        let createdFaces = 0;
+        for (const f of facesToCreate) {
+            try {
+                const r = await fetch('/api/faces', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(f)
+                });
+                if (r.ok) createdFaces++;
+            } catch (e) {
+                console.warn('create face failed:', e);
+            }
+        }
+
         showMessage(`学生导入完成：插入 ${data.inserted}，更新 ${data.updated}，跳过 ${data.skipped}`, 'success');
         setDataResults(`
             <h4>学生导入结果</h4>
@@ -1501,9 +2017,14 @@ async function importStudentsFromFolder() {
               <li>插入: ${data.inserted}</li>
               <li>更新: ${data.updated}</li>
               <li>跳过: ${data.skipped}</li>
+              <li>生成可识别面部: ${createdFaces} / ${facesToCreate.length}</li>
             </ul>
             ${data.errors && data.errors.length ? ('<h5>错误列表</h5>' + jsonPre(data.errors)) : ''}
         `);
+        // Refresh FaceMatcher so new faces can be recognized right away
+        try { await loadKnownFaces(); } catch (e) { console.warn('loadKnownFaces after import failed', e); }
+        // Optionally refresh current table
+        if (typeof loadStudentsTable === 'function') loadStudentsTable();
     } catch (e) {
         console.error(e);
         showMessage(`学生导入失败: ${e.message}`, 'error');
@@ -1527,12 +2048,29 @@ async function submitNewStudent() {
         });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || resp.statusText);
+
+        // Optional: upload manual photo if provided
+        try {
+            const photoEl = document.getElementById('student-photo-input');
+            const file = photoEl && photoEl.files && photoEl.files[0];
+            if (file) {
+                await uploadStudentPhoto(sn, name, null, gender, file);
+            }
+        } catch (e) {
+            console.warn('manual photo upload failed:', e);
+        }
+
         showMessage('学生创建成功', 'success');
         setDataResults(`<h4>新建学生</h4>${jsonPre(data.student || data)}`);
+
         // Clear inputs
         document.getElementById('student-number-input').value = '';
         document.getElementById('student-name-input').value = '';
         document.getElementById('student-gender-input').value = '';
+        const photoEl2 = document.getElementById('student-photo-input');
+        if (photoEl2) photoEl2.value = '';
+
+        if (typeof loadStudentsTable === 'function') loadStudentsTable();
     } catch (e) {
         console.error(e);
         showMessage(`学生创建失败: ${e.message}`, 'error');
@@ -1661,6 +2199,104 @@ async function importCourseStudentMappingsFromExcel() {
         console.error(e);
         showMessage(`映射导入失败: ${e.message}`, 'error');
     }
+}
+
+// ====== Data & Register: Lists (students/courses/mappings) ======
+async function loadStudentsTable() {
+    const resp = await fetch('/api/students');
+    const data = await resp.json();
+    // Be tolerant of different response shapes
+    const list = Array.isArray(data) ? data : (data.students || data.rows || data.data || []);
+    window.__studentsCache = list;
+    const f = document.getElementById('students-filter');
+    renderStudentsTable(window.__studentsCache, f ? f.value : '');
+}
+function renderStudentsTable(list, filterText) {
+    const host = document.getElementById('students-table');
+    if (!host) return;
+    host.innerHTML = '';
+    const text = (filterText || '').toLowerCase();
+    const rows = (list || []).filter(s => (`${s.student_number} ${s.name} ${s.class_name || ''}`).toLowerCase().includes(text));
+    if (rows.length === 0) { host.innerHTML = '<p>暂无学生</p>'; return; }
+    const tbl = document.createElement('table'); tbl.className = 'stats-table';
+    tbl.innerHTML = `<tr><th>学号</th><th>姓名</th><th>班级</th><th>性别</th><th>照片</th><th>创建时间</th><th>操作</th></tr>`;
+    rows.forEach(s => {
+        const tr = document.createElement('tr');
+        const photo = s.photo_path ? `<a href="${s.photo_path}" target="_blank">查看</a>` : '';
+        tr.innerHTML = `<td>${s.student_number||''}</td><td>${s.name||''}</td><td>${s.class_name||''}</td><td>${displayGender(s.gender)||''}</td><td>${photo}</td><td>${ (typeof formatTimeCN === 'function') ? formatTimeCN(s.created_at) : (s.created_at||'') }</td><td><button onclick="deleteStudent(${s.id})">删除</button></td>`;
+        tbl.appendChild(tr);
+    });
+    host.appendChild(tbl);
+}
+async function deleteStudent(id) {
+    if (!confirm('确认删除该学生？')) return;
+    const resp = await fetch(`/api/students/${id}`, { method: 'DELETE' });
+    const data = await resp.json();
+    if (!resp.ok) { showMessage(data.error || '删除失败', 'error'); return; }
+    showMessage('已删除学生', 'success');
+    loadStudentsTable();
+}
+
+async function loadCoursesTable() {
+    const resp = await fetch('/api/courses');
+    const data = await resp.json();
+    // Be tolerant of different response shapes
+    const list = Array.isArray(data) ? data : (data.courses || data.rows || data.data || []);
+    window.__coursesCache = list;
+    const f = document.getElementById('courses-filter');
+    renderCoursesTable(window.__coursesCache, f ? f.value : '');
+}
+function renderCoursesTable(list, filterText) {
+    const host = document.getElementById('courses-table'); if (!host) return; host.innerHTML='';
+    const text=(filterText||'').toLowerCase();
+    const rows=(list||[]).filter(c => (`${c.course_code} ${c.course_name}`).toLowerCase().includes(text));
+    if(rows.length===0){ host.innerHTML='<p>暂无课程</p>'; return; }
+    const tbl=document.createElement('table'); tbl.className='stats-table';
+    tbl.innerHTML = `<tr><th>课程编号</th><th>课程名称</th><th>学时</th><th>创建时间</th><th>操作</th></tr>`;
+    rows.forEach(c => {
+        const tr=document.createElement('tr');
+        tr.innerHTML = `<td>${c.course_code}</td><td>${c.course_name}</td><td>${c.course_hours ?? ''}</td><td>${ (typeof formatTimeCN === 'function') ? formatTimeCN(c.created_at) : (c.created_at||'') }</td><td><button onclick="deleteCourse(${c.id})">删除</button></td>`;
+        tbl.appendChild(tr);
+    });
+    host.appendChild(tbl);
+}
+async function deleteCourse(id){
+    if(!confirm('确认删除该课程？')) return;
+    const resp=await fetch(`/api/courses/${id}`, { method:'DELETE' });
+    const data=await resp.json();
+    if(!resp.ok){ showMessage(data.error||'删除失败','error'); return; }
+    showMessage('已删除课程','success');
+    loadCoursesTable();
+}
+
+async function loadMappingsTable(){
+    const resp=await fetch('/api/course-students');
+    const data=await resp.json();
+    window.__mappingsCache = data.mappings || [];
+    const f=document.getElementById('mappings-filter');
+    renderMappingsTable(window.__mappingsCache, f?f.value:'');
+}
+function renderMappingsTable(list, filterText){
+    const host=document.getElementById('mappings-table'); if(!host) return; host.innerHTML='';
+    const text=(filterText||'').toLowerCase();
+    const rows=(list||[]).filter(m => (`${m.student_number} ${m.name} ${m.course_code} ${m.course_name}`).toLowerCase().includes(text));
+    if(rows.length===0){ host.innerHTML='<p>暂无映射</p>'; return; }
+    const tbl=document.createElement('table'); tbl.className='stats-table';
+    tbl.innerHTML = `<tr><th>学号</th><th>姓名</th><th>课程名称</th><th>课程编号</th><th>创建时间</th><th>操作</th></tr>`;
+    rows.forEach(m => {
+        const tr=document.createElement('tr');
+        tr.innerHTML = `<td>${m.student_number}</td><td>${m.name}</td><td>${m.course_name}</td><td>${m.course_code}</td><td>${ (typeof formatTimeCN === 'function') ? formatTimeCN(m.created_at) : (m.created_at||'') }</td><td><button onclick="deleteMapping(${m.id})">删除</button></td>`;
+        tbl.appendChild(tr);
+    });
+    host.appendChild(tbl);
+}
+async function deleteMapping(id){
+    if(!confirm('确认删除该映射？')) return;
+    const resp=await fetch(`/api/course-students/${id}`, { method:'DELETE' });
+    const data=await resp.json();
+    if(!resp.ok){ showMessage(data.error||'删除失败','error'); return; }
+    showMessage('已删除映射','success');
+    loadMappingsTable();
 }
 
 // Hide legacy headings/blocks if still present in HTML
